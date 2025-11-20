@@ -1,0 +1,342 @@
+"""
+Visualization utilities for boolean functions on 2D grids
+
+Performance notes
+-----------------
+- The evaluators here call user-provided functions that often trigger heavy
+    numerical work (e.g., solving evolutions and building joint distributions).
+- For speed, both grid and curve evaluations support optional threaded
+    parallelism via ``n_jobs`` using ``concurrent.futures.ThreadPoolExecutor``.
+    Threads are chosen (vs processes) for robust use in notebooks and on Windows
+    without pickling issues; NumPy/SciPy operations typically release the GIL so
+    threads can still improve throughput.
+"""
+
+from typing import Callable, Iterable, Optional, Sequence, Tuple, List, Union
+from concurrent.futures import ThreadPoolExecutor
+import os
+import numpy as np
+import matplotlib.pyplot as plt
+from matplotlib.colors import ListedColormap, to_rgba
+
+__all__ = [
+    "boolean_grid",
+    "plot_boolean_region",
+    "plot_multioutput_curves",
+]
+
+def _auto_n_jobs() -> int:
+    """Pick a conservative default thread count without extra deps.
+
+    Heuristic:
+    - If BLAS env vars suggest internal threading (>1), return 1 to avoid oversubscription.
+    - Otherwise, use about half of logical CPUs minus one, capped at 16 and at least 1.
+    """
+    logical = os.cpu_count() or 1
+    # Check common BLAS threading env vars
+    blas_keys = ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "NUMEXPR_NUM_THREADS")
+    max_blas = 0
+    for k in blas_keys:
+        v = os.environ.get(k, "").strip()
+        try:
+            n = int(v)
+            if n > max_blas:
+                max_blas = n
+        except Exception:
+            pass
+    if max_blas > 1:
+        return 1
+    base = max(1, logical // 2)
+    return max(1, min(base - 1, 16))
+
+def _resolve_n_jobs(n_jobs: Optional[int]) -> int:
+    if n_jobs is None:
+        return _auto_n_jobs()
+    try:
+        n = int(n_jobs)
+    except Exception:
+        return _auto_n_jobs()
+    if n <= 0:
+        return _auto_n_jobs()
+    return n
+
+def boolean_grid(func: Callable[[float, float], Union[bool, Sequence[bool]]],
+                  x_range: Tuple[float, float],
+                  y_range: Tuple[float, float],
+                  n: int = 100,
+                  *,
+                  n_jobs: Optional[int] = None):
+    """Evaluate a boolean function (single or multi-output) on an (x,y) grid.
+
+    If func returns a single bool, returns (X, Y, mask) with mask shape (n,n).
+    If func returns a sequence of bools of length K, returns (X, Y, masks)
+    with masks shape (K, n, n), where masks[k] corresponds to the k-th output.
+    """
+    x_min, x_max = map(float, x_range)
+    y_min, y_max = map(float, y_range)
+    n = int(n)
+    x_vals = np.linspace(x_min, x_max, n)
+    y_vals = np.linspace(y_min, y_max, n)
+    Y_grid, X_grid = np.meshgrid(y_vals, x_vals)  # shape (n, n) each
+
+    # Probe first point to determine arity
+    first = func(float(X_grid.flat[0]), float(Y_grid.flat[0]))
+
+    # Helper to evaluate all remaining points, optionally threaded
+    nj = _resolve_n_jobs(n_jobs)
+    def eval_points_single():
+        mask = np.zeros((n, n), dtype=bool)
+        mask.flat[0] = bool(first)
+        if X_grid.size == 1:
+            return mask
+        coords = [(float(X_grid.flat[i]), float(Y_grid.flat[i])) for i in range(1, X_grid.size)]
+        if int(nj) and nj > 1:
+            with ThreadPoolExecutor(max_workers=int(nj)) as ex:
+                results = list(ex.map(lambda xy: bool(func(*xy)), coords))
+        else:
+            results = [bool(func(x, y)) for (x, y) in coords]
+        mask.flat[1:] = np.array(results, dtype=bool)
+        return mask
+
+    def eval_points_multi(K: int, first_vals: Sequence[bool]):
+        masks = np.zeros((K, n, n), dtype=bool)
+        for k in range(K):
+            masks[k].flat[0] = bool(first_vals[k])
+        if X_grid.size == 1:
+            return masks
+        coords = [(float(X_grid.flat[i]), float(Y_grid.flat[i])) for i in range(1, X_grid.size)]
+        if int(nj) and nj > 1:
+            with ThreadPoolExecutor(max_workers=int(nj)) as ex:
+                results = list(ex.map(func, [c[0] for c in coords], [c[1] for c in coords]))
+        else:
+            results = [func(x, y) for (x, y) in coords]
+        for idx, val in enumerate(results, start=1):
+            for k in range(K):
+                masks[k].flat[idx] = bool(val[k])
+        return masks
+
+    if isinstance(first, (list, tuple, np.ndarray)):
+        outs = list(first)
+        K = len(outs)
+        masks = eval_points_multi(K, outs)
+        return X_grid, Y_grid, masks
+    else:
+        mask = eval_points_single()
+        return X_grid, Y_grid, mask
+
+def plot_boolean_region(
+    func: Callable[[float, float], Union[bool, Sequence[bool]]],
+    x_range: Tuple[float, float],
+    y_range: Tuple[float, float],
+    n: int = 100,
+    *,
+    n_jobs: Optional[int] = None,
+    label: Optional[Union[str, Sequence[str]]] = None,
+    color: Optional[Union[str, Sequence[str]]] = None,
+    alpha: Union[float, Sequence[float]] = 0.4,
+    mode: str = "overlay",
+    ax: Optional[plt.Axes] = None,
+):
+    """Plot boolean region(s) for a single- or multi-output function.
+
+    - func(x,y) -> bool or Sequence[bool]; if multiple, length K.
+    - mode: "overlay" (default) draws all K on one axes; "separate" draws K figures;
+      "both" draws overlay then separate. Returns:
+        * overlay: (fig, ax)
+        * separate: list[(fig, ax)]
+        * both: (fig_overlay, ax_overlay, list[(fig, ax)])
+    - label/color/alpha accept a single value or a list of length K.
+    - ax: used only for overlay mode.
+    """
+    X_grid, Y_grid, masks = boolean_grid(func, x_range, y_range, n=n, n_jobs=n_jobs)
+
+    # Normalize to multi-output representation
+    if masks.ndim == 2:
+        masks = masks[None, ...]
+    K = masks.shape[0]
+
+    # Normalize styling inputs
+    def to_list(x, default, k):
+        if x is None:
+            return [default for _ in range(k)]
+        if isinstance(x, (list, tuple)):
+            return list(x)
+        return [x for _ in range(k)]
+
+    labels = to_list(label, None, K)
+    colors = to_list(color, None, K)
+    alphas = to_list(alpha, 0.4, K)
+
+    def draw_one(ax_obj, mk, lab, col, alp):
+        # Pick color
+        if col is None:
+            col = next(ax_obj._get_lines.prop_cycler)['color']
+        rgba = to_rgba(col)
+        cmap = ListedColormap([(0, 0, 0, 0), (rgba[0], rgba[1], rgba[2], 1.0)])
+        ax_obj.imshow(mk.astype(float),
+                      origin='lower',
+                      extent=(y_range[0], y_range[1], x_range[0], x_range[1]),
+                      aspect='auto',
+                      interpolation='nearest',
+                      cmap=cmap,
+                      alpha=float(alp))
+        if lab:
+            from matplotlib.patches import Patch
+            proxy = Patch(facecolor=col, alpha=float(alp), label=lab)
+            existing = ax_obj.get_legend()
+            if existing is not None:
+                old_handles = list(existing.legendHandles)
+                old_labels = [t.get_text() for t in existing.texts]
+            else:
+                old_handles, old_labels = [], []
+            ax_obj.legend(old_handles + [proxy], old_labels + [lab], loc='best')
+        ax_obj.set_xlabel('y')
+        ax_obj.set_ylabel('x')
+
+    mode = str(mode).lower()
+    if mode not in ("overlay", "separate", "both"):
+        raise ValueError("mode must be 'overlay', 'separate', or 'both'")
+
+    results = None
+
+    # Overlay plot
+    if mode in ("overlay", "both"):
+        if ax is None:
+            fig_overlay, ax_overlay = plt.subplots(figsize=(6, 5))
+        else:
+            ax_overlay = ax
+            fig_overlay = ax_overlay.figure
+        for k in range(K):
+            draw_one(ax_overlay, masks[k], labels[k], colors[k], alphas[k])
+        ax_overlay.set_xlim(y_range)
+        ax_overlay.set_ylim(x_range)
+        ax_overlay.set_title('Boolean Region' if K == 1 else 'Overlay of Boolean Regions')
+        if mode == "overlay":
+            return fig_overlay, ax_overlay
+        results = (fig_overlay, ax_overlay)
+
+    # Separate plots
+    if mode in ("separate", "both"):
+        fig_list: List[plt.Figure] = []
+        ax_list: List[plt.Axes] = []
+        for k in range(K):
+            fig_k, ax_k = plt.subplots(figsize=(5, 4))
+            draw_one(ax_k, masks[k], labels[k], colors[k], alphas[k])
+            ax_k.set_xlim(y_range)
+            ax_k.set_ylim(x_range)
+            ax_k.set_title(labels[k] or f'Region {k+1}')
+            fig_list.append(fig_k)
+            ax_list.append(ax_k)
+        if mode == "separate":
+            return list(zip(fig_list, ax_list))
+        else:
+            return results + (list(zip(fig_list, ax_list)),)  # type: ignore
+
+
+def plot_multioutput_curves(
+    func: Callable[[float], Union[float, Sequence[float]]],
+    x_values: np.ndarray,
+    *,
+    n_jobs: Optional[int] = None,
+    label: Optional[Union[str, Sequence[str]]] = None,
+    color: Optional[Union[str, Sequence[str]]] = None,
+    linewidth: Union[float, Sequence[float]] = 1.5,
+    ax: Optional[plt.Axes] = None,
+):
+    """Plot multiple y(x) curves returned by a single-input function on one axes.
+
+    Parameters
+    ----------
+    func : Callable[[float], float | Sequence[float]]
+        Function mapping a single float ``x`` to either a single float or a
+        sequence of floats (multi-output). If single-output, one curve is drawn.
+    x_values : np.ndarray
+        1D array of x values at which to evaluate ``func``.
+    label : str | Sequence[str], optional
+        Label(s) for the curve(s); if multi-output, supply a list of length K.
+    color : str | Sequence[str], optional
+        Color(s) for the curve(s); if multi-output, supply a list of length K.
+    linewidth : float | Sequence[float], optional
+        Line width(s) for the curve(s). Defaults to ``1.5``.
+    ax : matplotlib.axes.Axes, optional
+        Target axes. If not provided, a new figure and axes are created.
+
+    Returns
+    -------
+    (fig, ax)
+        The Matplotlib figure and axes containing the overlay plot.
+    """
+    x_values = np.asarray(x_values, dtype=float).ravel()
+    if x_values.ndim != 1:
+        raise ValueError("x_values must be a 1D array")
+
+    # Probe first point to determine arity
+    first = func(float(x_values[0]))
+
+    nj = _resolve_n_jobs(n_jobs)
+    if isinstance(first, (list, tuple, np.ndarray)):
+        outs0 = list(first)
+        K = len(outs0)
+        Y = np.zeros((K, x_values.size), dtype=float)
+        for k in range(K):
+            Y[k, 0] = float(outs0[k])
+        if x_values.size > 1:
+            xs = [float(x) for x in x_values[1:]]
+            if int(nj) and nj > 1:
+                with ThreadPoolExecutor(max_workers=int(nj)) as ex:
+                    results = list(ex.map(func, xs))
+            else:
+                results = [func(x) for x in xs]
+            for i, vals in enumerate(results, start=1):
+                for k in range(K):
+                    Y[k, i] = float(vals[k])
+    else:
+        K = 1
+        Y = np.zeros((1, x_values.size), dtype=float)
+        Y[0, 0] = float(first)
+        if x_values.size > 1:
+            xs = [float(x) for x in x_values[1:]]
+            if int(nj) and nj > 1:
+                with ThreadPoolExecutor(max_workers=int(nj)) as ex:
+                    results = list(ex.map(func, xs))
+            else:
+                results = [func(x) for x in xs]
+            for i, val in enumerate(results, start=1):
+                Y[0, i] = float(val)
+
+    # Normalize styling inputs
+    def to_list(x, default, k):
+        if x is None:
+            return [default for _ in range(k)]
+        if isinstance(x, (list, tuple)):
+            return list(x)
+        return [x for _ in range(k)]
+
+    labels = to_list(label, None, K)
+    colors = to_list(color, None, K)
+    lws    = to_list(linewidth, 1.5, K)
+
+    # Prepare axes
+    if ax is None:
+        fig, ax = plt.subplots(figsize=(6, 4))
+    else:
+        fig = ax.figure
+
+    # Draw curves
+    for k in range(K):
+        col = colors[k]
+        if col is None:
+            # Fallback to Matplotlib's line color cycler
+            try:
+                col = ax._get_lines.get_next_color()
+            except Exception:
+                col = None
+        ax.plot(x_values, Y[k], label=labels[k], color=col, linewidth=float(lws[k]))
+
+    if any(lab is not None for lab in labels):
+        ax.legend(loc='best')
+    ax.set_xlabel('x')
+    ax.set_ylabel('y')
+    ax.set_title('Curves' if K == 1 else 'Overlay of Curves')
+    ax.grid(True, alpha=0.2)
+    return fig, ax

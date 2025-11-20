@@ -1,0 +1,609 @@
+"""
+bloch4spin: Evolution of operators and states in Bloch representation
+---------------------------------------------------------------------
+Provides dataclass wrappers for Hamiltonians, Liouvillian evolution matrices,
+and density operators expressed in the canonical orthonormal Bloch basis
+(COBITO) defined in ``bloch4spin.basis``. The Bloch vector ``r`` obeys
+
+.. math:: \frac{dr}{dt} = L r,
+
+where ``L`` collects both unitary and dissipative contributions.
+
+Unitary (Hamiltonian) part
+-------------------------
+For a Hermitian Hamiltonian ``H`` the Liouville–von Neumann equation
+``\dot{\rho} = -i[H,\rho]`` yields
+
+.. math:: (L_H)_{ab} = -i\,\mathrm{Tr}\big(T_a^{\dagger}[H, T_b]\big)
+          = -i\,\sum_c h_c\, f_{a b}^{\;c},
+
+with Bloch coefficients ``h_c`` and structure constants ``f_{ab}^{\;c}``.
+
+Dissipative (Lindblad) part
+---------------------------
+For a single Lindblad jump operator ``K`` the dissipator
+``\mathcal{L}_K[\rho] = K\rho K^{\dagger} - \tfrac12\{K^{\dagger}K,\rho\}`` has
+
+.. math:: (L_K)_{ab} = \mathrm{Tr}\!\left[T_a^{\dagger}\!\left(K T_b K^{\dagger}
+          - \tfrac12 T_b K^{\dagger}K - \tfrac12 K^{\dagger}K T_b\right)\right].
+
+Public API
+----------
+- ``GeneralizedBlochHamiltonian``: Hermitian Hamiltonian in Bloch space.
+- ``GeneralizedBlochEvolutionMatrix``: Liouvillian / evolution matrix acting on Bloch vectors.
+- ``GeneralizedBlochState``: Hermitian density operator represented as a Bloch vector.
+"""
+
+from dataclasses import dataclass, field
+from typing import Any
+from collections import OrderedDict
+import numpy as np
+from scipy.sparse import csr_matrix, isspmatrix_csr
+from scipy.sparse.linalg import expm_multiply
+from scipy.linalg import expm as dense_expm
+from .basis import (
+    GeneralizedBlochVector,
+    bloch_dim,
+    structure_const,
+    bloch_inner_product,
+    bloch_hermitian_transpose,
+    bloch_tensor_product,
+    _kq_from_idx,
+)
+
+__all__ = [
+    "GeneralizedBlochHamiltonian",
+    "GeneralizedBlochEvolutionMatrix",
+    "GeneralizedBlochState",
+]
+
+@dataclass
+class GeneralizedBlochHamiltonian(GeneralizedBlochVector):
+    """Hermitian Hamiltonian in Bloch space.
+
+    Represents a Hermitian operator ``H`` through its Bloch (COBITO) expansion
+    coefficients ``h_a``. Hermiticity is verified at construction time.
+
+    Parameters
+    ----------
+    data : numpy.ndarray
+        One-dimensional complex array of length ``d**2`` containing the Bloch
+        coefficients of the Hamiltonian.
+
+    Raises
+    ------
+    ValueError
+        If the supplied Bloch coefficients do not satisfy Hermiticity under
+        the transformation implemented by ``bloch_hermitian_transpose``.
+
+    Notes
+    -----
+    Hermiticity test uses ``np.allclose`` with ``rtol=1e-10`` and
+    ``atol=1e-12``; adjust at call site by post-validating if tighter
+    tolerances are required.
+    """
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        # Hermiticity check
+        s = bloch_hermitian_transpose(self)
+        if not np.allclose(self.data, s.data, rtol=1e-10, atol=1e-12):
+            raise ValueError("Hamiltonian must be Hermitian in operator space.")
+
+    @staticmethod
+    def from_matrix(mat: np.ndarray) -> "GeneralizedBlochHamiltonian":
+        """Create a Bloch-space Hamiltonian from a matrix.
+
+        Converts a Hermitian matrix ``H`` (shape ``(d,d)``) into Bloch
+        coefficients via the basis inner products.
+
+        Parameters
+        ----------
+        mat : numpy.ndarray
+            Square ``(d,d)`` complex Hermitian matrix representing ``H``.
+
+        Returns
+        -------
+        GeneralizedBlochHamiltonian
+            Bloch-space Hamiltonian with validated Hermiticity.
+
+        Raises
+        ------
+        ValueError
+            If ``mat`` is not Hermitian within numerical tolerance.
+        """
+        gv = GeneralizedBlochVector.from_matrix(mat)
+        return GeneralizedBlochHamiltonian(gv.data)
+
+    # Restrict scaling to real scalars only; disallow scalar/vector reversed division
+    def __mul__(self, other):
+        if np.isscalar(other) and np.isrealobj(other):
+            return self._wrap_result(self.data * float(other))
+        return NotImplemented
+
+    def __rmul__(self, other):
+        if np.isscalar(other) and np.isrealobj(other):
+            return self._wrap_result(float(other) * self.data)
+        return NotImplemented
+
+    def __truediv__(self, other):
+        if np.isscalar(other) and np.isrealobj(other):
+            return self._wrap_result(self.data / float(other))
+        return NotImplemented
+
+    def __imul__(self, other):
+        if np.isscalar(other) and np.isrealobj(other):
+            self.data *= float(other)
+            # Hermiticity check happens on demand (construction already ensured)
+            return self
+        return NotImplemented
+
+    def __itruediv__(self, other):
+        if np.isscalar(other) and np.isrealobj(other):
+            self.data /= float(other)
+            return self
+        return NotImplemented
+
+@dataclass
+class GeneralizedBlochEvolutionMatrix:
+    """Liouvillian evolution matrix acting on Bloch vectors.
+
+    Encodes the linear map ``r -> L r`` for both unitary and dissipative
+    (Lindblad) dynamics in Bloch coordinates. For dimension ``d`` the shape is
+    ``(d**2, d**2)``.
+
+    Parameters
+    ----------
+    data : numpy.ndarray
+        Two-dimensional complex array of shape ``(d**2, d**2)`` giving the
+        evolution matrix elements.
+
+    Raises
+    ------
+    ValueError
+        If ``data`` is not square or cannot be cast to complex type.
+
+    See Also
+    --------
+    GeneralizedBlochHamiltonian : Source for constructing unitary evolution.
+    GeneralizedBlochState : Target objects evolved by this matrix.
+    GeneralizedBlochObservable : Construction patterns for Kraus/superoperators.
+
+    Notes
+    -----
+    In operator space, unitary dynamics generate an anti-Hermitian commutator.
+    In Bloch coordinates, ``L`` need not be anti-Hermitian but its spectrum
+    reflects trace preservation and Hermiticity constraints.
+    """
+
+    data: csr_matrix
+    # Internal cache for small dense expm(t*L) matrices
+    _dense: np.ndarray | None = field(default=None, init=False, repr=False)
+    _expm_cache: "OrderedDict[float, np.ndarray]" = field(default_factory=OrderedDict, init=False, repr=False)
+    _expm_cache_maxsize: int = field(default=512, init=False, repr=False)
+    _expm_cache_round: int = field(default=12, init=False, repr=False)
+    __array_priority__ = 1000
+
+    def __post_init__(self) -> None:
+        # Accept dense or sparse; store as CSR complex128
+        arr = self.data
+        if not isspmatrix_csr(arr):
+            arr = csr_matrix(np.asarray(arr, dtype=np.complex128))
+        if arr.shape[0] != arr.shape[1]:
+            raise ValueError("Evolution matrix must be square (d^2 x d^2).")
+        # Ensure complex128 dtype
+        if arr.dtype != np.complex128:
+            arr = arr.astype(np.complex128)
+        self.data = arr
+
+    # Small-dimension helper: cached dense expm(t*L)
+    def _get_dense(self) -> np.ndarray:
+        if self._dense is None:
+            self._dense = self.data.toarray()
+        return self._dense
+
+    def _dense_expm_cached(self, t: float) -> np.ndarray:
+        key = round(float(t), self._expm_cache_round)
+        cache = self._expm_cache
+        if key in cache:
+            cache.move_to_end(key)
+            return cache[key]
+        Ld = self._get_dense()
+        mat = dense_expm(Ld * key)
+        cache[key] = mat
+        if len(cache) > self._expm_cache_maxsize:
+            cache.popitem(last=False)
+        return mat
+
+    # NumPy interop
+    def __array__(self, dtype=None) -> np.ndarray:
+        # Provide dense view for NumPy interop when needed
+        arr = self.data.toarray()
+        return arr.astype(dtype) if dtype is not None else arr
+
+    # Helpers
+    @staticmethod
+    def _is_scalar(x: Any) -> bool:
+        return np.isscalar(x) or isinstance(x, np.generic)
+
+    @staticmethod
+    def _as_2d_array(x: Any) -> np.ndarray | None:
+        try:
+            arr = np.asarray(x)
+        except Exception:
+            return None
+        if arr.ndim != 2:
+            return None
+        return arr
+
+    @classmethod
+    def _wrap_result(cls, arr: np.ndarray) -> "GeneralizedBlochEvolutionMatrix":
+        return cls(arr)
+
+    def copy(self) -> "GeneralizedBlochEvolutionMatrix":
+        """Return a deep copy of the evolution matrix."""
+        return self.__class__(self.data.copy())
+
+    def __repr__(self) -> str:
+        n = self.data.shape[0] if self.data.ndim == 2 else 0
+        return f"GeneralizedBlochEvolutionMatrix(shape=({n},{n}), dtype=complex)"
+
+    # Arithmetic operators (elementwise for matrices)
+    def _ensure_same_shape(self, other_arr: np.ndarray) -> bool:
+        return other_arr.ndim == 2 and other_arr.shape == self.data.shape
+
+    def __add__(self, other):
+        if isinstance(other, GeneralizedBlochEvolutionMatrix):
+            return self._wrap_result(self.data + other.data)
+        return NotImplemented
+
+    def __radd__(self, other):
+        return self.__add__(other)
+
+    def __sub__(self, other):
+        if isinstance(other, GeneralizedBlochEvolutionMatrix):
+            return self._wrap_result(self.data - other.data)
+        return NotImplemented
+
+    def __rsub__(self, other):
+        if isinstance(other, GeneralizedBlochEvolutionMatrix):
+            return self._wrap_result(other.data - self.data)
+        return NotImplemented
+
+    def __mul__(self, other):
+        # Only scalar scaling is supported
+        if self._is_scalar(other) and np.isrealobj(other):
+            return self._wrap_result(self.data * float(other))
+        return NotImplemented
+
+    def __rmul__(self, other):
+        if self._is_scalar(other) and np.isrealobj(other):
+            return self._wrap_result(float(other) * self.data)
+        return NotImplemented
+
+    def __truediv__(self, other):
+        # Sparse matrices do not support scalar division efficiently
+        return NotImplemented
+    
+    def __neg__(self):
+        return self._wrap_result(-self.data)
+
+    def __iadd__(self, other):
+        if isinstance(other, GeneralizedBlochEvolutionMatrix):
+            self.data = (self.data + other.data).tocsr()
+            return self
+        return NotImplemented
+
+    def __isub__(self, other):
+        if isinstance(other, GeneralizedBlochEvolutionMatrix):
+            self.data = (self.data - other.data).tocsr()
+            return self
+        return NotImplemented
+
+    def __imul__(self, other):
+        if self._is_scalar(other) and np.isrealobj(other):
+            self.data = (self.data * float(other)).tocsr()
+            return self
+        return NotImplemented
+
+    def __itruediv__(self, other):
+        # Not supported for sparse efficiently
+        return NotImplemented
+
+    @staticmethod
+    def from_Hamiltonian(Ham: Any) -> "GeneralizedBlochEvolutionMatrix":
+        """Construct the Liouvillian ``L`` for unitary evolution.
+
+        Accepts a Hamiltonian specified either as a Bloch-space object or as
+        a matrix and guarantees Hermiticity by first instantiating a
+        ``GeneralizedBlochHamiltonian``.
+
+        Parameters
+        ----------
+        Ham : GeneralizedBlochHamiltonian or GeneralizedBlochVector or numpy.ndarray
+            Hamiltonian specification. If an ``ndarray`` is supplied it must be
+            a square Hermitian matrix; if a raw ``GeneralizedBlochVector`` is
+            supplied it must represent a Hermitian operator (checked during
+            ``GeneralizedBlochHamiltonian`` construction).
+
+        Returns
+        -------
+        GeneralizedBlochEvolutionMatrix
+            Evolution matrix implementing ``r -> L r``.
+
+        Raises
+        ------
+        TypeError
+            If ``Ham`` is not one of the accepted types.
+        ValueError
+            If Hermiticity validation fails when constructing the Hamiltonian.
+
+        Notes
+        -----
+        Using ``[T_a, T_b] = \sum_c f_{ab}^{\;c} T_c`` and
+        ``[H, T_b] = \sum_c h_c f_{c b}^{\;d} T_d`` gives
+
+        .. math:: (L_H)_{ab} = -i\, \mathrm{Tr}\big(T_a^{\dagger}[H, T_b]\big)
+              = -i \sum_c h_c f_{a b}^{\;c}.
+
+        Structure constants are retrieved through ``structure_const``; phase
+        factors use ``T_q^{(k)\dagger} = (-1)^q T_{-q}^{(k)}``.
+        """
+        # Canonicalize to a validated GeneralizedBlochHamiltonian
+        if isinstance(Ham, GeneralizedBlochHamiltonian):
+            H = Ham
+        elif isinstance(Ham, GeneralizedBlochVector):
+            H = GeneralizedBlochHamiltonian(Ham.data)
+        elif isinstance(Ham, np.ndarray):
+            H = GeneralizedBlochHamiltonian.from_matrix(Ham)
+        else:
+            raise TypeError("Ham must be ndarray, GeneralizedBlochVector, or GeneralizedBlochHamiltonian.")
+
+        d = H.data.size
+        mat = np.zeros((d, d), dtype=complex)
+        # Map indices to (k,q)
+        kq = [_kq_from_idx(n) for n in range(d)]
+        # Compute each matrix element via c-vector of [T_a, T_b]
+        for a in range(d):
+            ka, qa = kq[a]
+            for b in range(d):
+                kb, qb = kq[b]
+                phase = (-1) ** qb
+                # c-vector of structure constants f_{ab}^c
+                c_vec = structure_const((ka, qa), (kb, -qb))
+                mat[a, b] = -1j * phase * bloch_inner_product(c_vec, H)
+        return GeneralizedBlochEvolutionMatrix(csr_matrix(mat, dtype=np.complex128))
+
+    @staticmethod
+    def from_Lindblad(K: Any, *, atol: float = 1e-12) -> "GeneralizedBlochEvolutionMatrix":
+        """Construct the dissipative Liouvillian row-wise from a Lindblad operator.
+
+        Builds the matrix ``L_K`` corresponding to the superoperator
+        ``\mathcal{L}_K[\rho] = K\rho K^{\dagger} - \tfrac12\{K^{\dagger}K,\rho\}``.
+        In Bloch coordinates, rows are
+
+        .. math:: (L_K)_{ab} = \mathrm{Tr}\!\left[T_a^{\dagger}\!\left(K T_b K^{\dagger}
+            - \tfrac12 T_b K^{\dagger}K - \tfrac12 K^{\dagger}K T_b\right)\right],
+
+        which we assemble via the adjoint map as
+
+        .. math:: k_a = \mathrm{Bloch}\!\left(K^{\dagger} T_a K
+            - \tfrac12 K^{\dagger}K\, T_a - \tfrac12 T_a \, K^{\dagger}K\right),\quad
+            L[a,:] = \overline{k_a}^T.
+
+        Parameters
+        ----------
+        K : numpy.ndarray or GeneralizedBlochVector
+            Lindblad jump operator. If a matrix is supplied it is converted to
+            Bloch coordinates via ``GeneralizedBlochVector.from_matrix``.
+        atol : float, optional
+            Numerical tolerance used internally when needed (default ``1e-12``).
+
+        Returns
+        -------
+        GeneralizedBlochEvolutionMatrix
+            Evolution matrix implementing the single-operator dissipator.
+
+        Notes
+        -----
+        Row construction mirrors ``from_Kraus`` in ``observable.py`` but applies
+        the anti-commutator subtraction. All products are computed via the
+        cached Bloch-space tensor product.
+        """
+        # Canonicalize K into a Bloch vector
+        if isinstance(K, GeneralizedBlochVector):
+            rK = K
+        else:
+            rK = GeneralizedBlochVector.from_matrix(np.asarray(K))
+        rK_dag = bloch_hermitian_transpose(rK)
+        rMM = rK_dag * rK  # Bloch(K^\dagger K)
+
+        d = bloch_dim()
+        D = d * d
+        L = np.zeros((D, D), dtype=np.complex128)
+
+        # Unit vectors e_a for each basis index a
+        for a in range(D):
+            e_a = np.zeros((D,), dtype=complex)
+            e_a[a] = 1.0
+            rTa = GeneralizedBlochVector(e_a)
+            # K^\dagger T_a K
+            jump_term = rK_dag * rTa * rK
+            # (1/2) K^\dagger K T_a and (1/2) T_a K^\dagger K
+            left = rMM * rTa
+            right = rTa * rMM
+            k_a = jump_term - 0.5 * (left + right)
+            L[a, :] = np.conj(k_a.data)
+
+        return GeneralizedBlochEvolutionMatrix(csr_matrix(L))
+
+@dataclass
+class GeneralizedBlochState(GeneralizedBlochVector):
+    """Density operator represented as a Bloch vector.
+
+    Stores Bloch coefficients ``r_a`` of a Hermitian density matrix ``ρ``.
+    Hermiticity is verified on construction; normalization can be enforced via
+    ``normalization``.
+
+    Parameters
+    ----------
+    data : numpy.ndarray
+        One-dimensional complex array of length ``d**2`` containing Bloch
+        coefficients of the density operator.
+
+    Raises
+    ------
+    ValueError
+        If Hermiticity validation fails.
+
+    Notes
+    -----
+    The trace condition ``Tr(ρ)=1`` corresponds (in the chosen COBITO
+    convention) to a fixed value of the ``r_{00}`` component; see
+    ``normalization`` for enforcement.
+    """
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        # Hermiticity check
+        s = bloch_hermitian_transpose(self)
+        if not np.allclose(self.data, s.data, rtol=1e-10, atol=1e-10):
+            raise ValueError("Density Matrix must be Hermitian in operator space.")
+
+    def normalization(self) -> complex:
+        """Normalize the Bloch state so that ``Tr(ρ)=1``.
+
+        Ensures the density operator trace equals unity by rescaling the Bloch
+        vector with a complex factor determined from ``r_{00}``.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        complex
+            Scaling factor applied in-place to ``self.data``.
+
+        Raises
+        ------
+        ValueError
+            If ``r_{00}`` is zero (normalization impossible).
+
+        Notes
+        -----
+        With the COBITO choice ``T_0^{(0)} = I/\sqrt{d}``, a normalized state
+        satisfies ``r_{00} = 1/\sqrt{d}``.
+        """
+        d = bloch_dim()
+        target = 1.0 / np.sqrt(d)
+        r00 = self.data[0]
+        if r00 == 0:
+            raise ValueError("Cannot normalize: r_{00} is zero.")
+        scale = target / r00
+        self.data *= scale
+        return scale
+
+    @staticmethod
+    def from_matrix(mat: np.ndarray) -> "GeneralizedBlochState":
+        """Create a Bloch-state from an operator matrix.
+
+        Parameters
+        ----------
+        mat : numpy.ndarray
+            Square complex Hermitian matrix representing a density operator or
+            general Hermitian operator (will be interpreted as a state).
+
+        Returns
+        -------
+        GeneralizedBlochState
+            Bloch-space state with Hermiticity validated.
+
+        Raises
+        ------
+        ValueError
+            If ``mat`` fails Hermiticity validation.
+        """
+        gbvec = GeneralizedBlochVector.from_matrix(mat)
+        return GeneralizedBlochState(gbvec.data)
+
+    def evolve(self, L: GeneralizedBlochEvolutionMatrix, time: float) -> None:
+        """Evolve the Bloch state in place: ``r ← exp(L t) r``.
+
+        Applies Bloch-space dynamics (unitary and/or dissipative) via a
+        numerically stable exponential–vector product. Prefers
+        ``scipy.sparse.linalg.expm_multiply``; for very small systems it uses a
+        cached dense matrix exponential for speed.
+
+        Parameters
+        ----------
+        L : GeneralizedBlochEvolutionMatrix
+            Evolution (Liouvillian) matrix acting on the state.
+        time : float
+            Real evolution time ``t``.
+
+        Returns
+        -------
+        None
+            The state is modified in place.
+
+        Raises
+        ------
+        TypeError
+            If ``L`` is not a ``GeneralizedBlochEvolutionMatrix`` or ``time``
+            is not a scalar.
+
+        Notes
+        -----
+                - The eigen-decomposition approach can be inaccurate/unstable for
+                    non-normal generators due to ill-conditioned eigenvectors. Using
+                    ``expm_multiply`` (Padé with scaling/squaring / Krylov) improves
+                    robustness with negligible overhead for the small sizes used here.
+        """
+        if not isinstance(L, GeneralizedBlochEvolutionMatrix):
+            raise TypeError("L must be a GeneralizedBlochEvolutionMatrix")
+        if not np.isscalar(time):
+            raise TypeError("time must be a scalar")
+        t = float(time)
+        # For small systems, use cached dense expm(t*L) for speed; else Krylov
+        n = L.data.shape[0]
+        if n <= 16:
+            mat = L._dense_expm_cached(t)
+            self.data = mat @ self.data
+        else:
+            # Use SciPy's stable expm_multiply (required dependency)
+            self.data = expm_multiply(L.data * t, self.data)
+        # Light Hermiticity symmetrization to curb roundoff drift
+        try:
+            s = bloch_hermitian_transpose(self)
+            self.data = 0.5 * (self.data + s.data)
+        except Exception:
+            pass
+
+    # Restrict scaling to real scalars only; disallow scalar/vector reversed division
+    def __mul__(self, other):
+        if np.isscalar(other) and np.isrealobj(other):
+            return self._wrap_result(self.data * float(other))
+        return NotImplemented
+
+    def __rmul__(self, other):
+        if np.isscalar(other) and np.isrealobj(other):
+            return self._wrap_result(float(other) * self.data)
+        return NotImplemented
+
+    def __truediv__(self, other):
+        if np.isscalar(other) and np.isrealobj(other):
+            return self._wrap_result(self.data / float(other))
+        return NotImplemented
+
+    def __imul__(self, other):
+        if np.isscalar(other) and np.isrealobj(other):
+            self.data *= float(other)
+            return self
+        return NotImplemented
+
+    def __itruediv__(self, other):
+        if np.isscalar(other) and np.isrealobj(other):
+            self.data /= float(other)
+            return self
+        return NotImplemented

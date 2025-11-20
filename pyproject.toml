@@ -1,0 +1,20 @@
+[project]
+name = "lgbloch"
+version = "0.1.0"
+description = "Utilities for entropic and standard LG inequalities in spin-j systems."
+readme = "README.md"
+authors = [ { name = "Local Dev" } ]
+license = { text = "Unlicensed" }
+requires-python = ">=3.9"
+dependencies = [
+	"numpy>=1.24",
+	"scipy>=1.11",
+	"sympy>=1.10"
+]
+
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["lgbloch"]
