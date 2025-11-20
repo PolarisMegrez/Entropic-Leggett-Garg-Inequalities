@@ -18,8 +18,8 @@ Requirements:
 
 Clone and install (editable for development):
 ```powershell
-git clone https://github.com/PolarisMegrez/entropic-lgi.git
-cd entropic-lgi
+git clone https://github.com/PolarisMegrez/Entropic-Leggett-Garg-Inequalities.git
+cd Entropic-Leggett-Garg-Inequalities
 pip install -e .
 ```
 

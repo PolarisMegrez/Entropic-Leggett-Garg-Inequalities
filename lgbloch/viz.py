@@ -25,6 +25,29 @@ __all__ = [
     "plot_multioutput_curves",
 ]
 
+def _set_default_rcparams() -> None:
+    """Apply project-wide default Matplotlib font/mathtext settings."""
+    plt.rcParams['font.family'] = 'sans-serif'
+    plt.rcParams['font.sans-serif'] = ['Arial']
+    plt.rcParams['mathtext.fontset'] = 'custom'
+    plt.rcParams['mathtext.rm'] = 'sans'
+    plt.rcParams['mathtext.it'] = 'sans:italic'
+    plt.rcParams['mathtext.bf'] = 'sans:bold'
+
+def _style_axes(ax: plt.Axes, *, x_label: Optional[str] = None, y_label: Optional[str] = None, title: Optional[str] = None) -> None:
+    """Apply consistent axis labels, ticks, and optional title.
+
+    - x_label/y_label default to 'x'/'y' when not provided
+    - tick label size set to 15; axis label size set to 18
+    - title is only set when provided (default: no title)
+    """
+    ax.set_xlabel(x_label if x_label is not None else 'x', fontsize=18)
+    ax.set_ylabel(y_label if y_label is not None else 'y', fontsize=18)
+    ax.tick_params(axis='x', labelsize=15)
+    ax.tick_params(axis='y', labelsize=15)
+    if title:
+        ax.set_title(title)
+
 def _auto_n_jobs() -> int:
     """Pick a conservative default thread count without extra deps.
 
@@ -136,6 +159,9 @@ def plot_boolean_region(
     alpha: Union[float, Sequence[float]] = 0.4,
     mode: str = "overlay",
     ax: Optional[plt.Axes] = None,
+    x_label: Optional[str] = None,
+    y_label: Optional[str] = None,
+    title: Optional[str] = None,
 ):
     """Plot boolean region(s) for a single- or multi-output function.
 
@@ -148,6 +174,9 @@ def plot_boolean_region(
     - label/color/alpha accept a single value or a list of length K.
     - ax: used only for overlay mode.
     """
+    # Matplotlib style per project convention
+    _set_default_rcparams()
+
     X_grid, Y_grid, masks = boolean_grid(func, x_range, y_range, n=n, n_jobs=n_jobs)
 
     # Normalize to multi-output representation
@@ -175,7 +204,7 @@ def plot_boolean_region(
         cmap = ListedColormap([(0, 0, 0, 0), (rgba[0], rgba[1], rgba[2], 1.0)])
         ax_obj.imshow(mk.astype(float),
                       origin='lower',
-                      extent=(y_range[0], y_range[1], x_range[0], x_range[1]),
+                      extent=(x_range[0], x_range[1], y_range[0], y_range[1]),
                       aspect='auto',
                       interpolation='nearest',
                       cmap=cmap,
@@ -189,9 +218,9 @@ def plot_boolean_region(
                 old_labels = [t.get_text() for t in existing.texts]
             else:
                 old_handles, old_labels = [], []
-            ax_obj.legend(old_handles + [proxy], old_labels + [lab], loc='best')
-        ax_obj.set_xlabel('y')
-        ax_obj.set_ylabel('x')
+            ax_obj.legend(old_handles + [proxy], old_labels + [lab], loc='upper right', fontsize=15, labelspacing=0.35)
+        # axis labels/ticks/title (title only when provided)
+        _style_axes(ax_obj, x_label=x_label, y_label=y_label, title=None)
 
     mode = str(mode).lower()
     if mode not in ("overlay", "separate", "both"):
@@ -208,9 +237,10 @@ def plot_boolean_region(
             fig_overlay = ax_overlay.figure
         for k in range(K):
             draw_one(ax_overlay, masks[k], labels[k], colors[k], alphas[k])
-        ax_overlay.set_xlim(y_range)
-        ax_overlay.set_ylim(x_range)
-        ax_overlay.set_title('Boolean Region' if K == 1 else 'Overlay of Boolean Regions')
+        ax_overlay.set_xlim(x_range)
+        ax_overlay.set_ylim(y_range)
+        # Optional title only if provided
+        _style_axes(ax_overlay, x_label=x_label, y_label=y_label, title=title)
         if mode == "overlay":
             return fig_overlay, ax_overlay
         results = (fig_overlay, ax_overlay)
@@ -222,9 +252,11 @@ def plot_boolean_region(
         for k in range(K):
             fig_k, ax_k = plt.subplots(figsize=(5, 4))
             draw_one(ax_k, masks[k], labels[k], colors[k], alphas[k])
-            ax_k.set_xlim(y_range)
-            ax_k.set_ylim(x_range)
-            ax_k.set_title(labels[k] or f'Region {k+1}')
+            ax_k.set_xlim(x_range)
+            ax_k.set_ylim(y_range)
+            # Optional per-axes title only if provided; otherwise none
+            per_title = title if title is not None else None
+            _style_axes(ax_k, x_label=x_label, y_label=y_label, title=per_title)
             fig_list.append(fig_k)
             ax_list.append(ax_k)
         if mode == "separate":
@@ -242,6 +274,9 @@ def plot_multioutput_curves(
     color: Optional[Union[str, Sequence[str]]] = None,
     linewidth: Union[float, Sequence[float]] = 1.5,
     ax: Optional[plt.Axes] = None,
+    x_label: Optional[str] = None,
+    y_label: Optional[str] = None,
+    title: Optional[str] = None,
 ):
     """Plot multiple y(x) curves returned by a single-input function on one axes.
 
@@ -316,6 +351,9 @@ def plot_multioutput_curves(
     colors = to_list(color, None, K)
     lws    = to_list(linewidth, 1.5, K)
 
+    # Apply global style
+    _set_default_rcparams()
+
     # Prepare axes
     if ax is None:
         fig, ax = plt.subplots(figsize=(6, 4))
@@ -334,9 +372,7 @@ def plot_multioutput_curves(
         ax.plot(x_values, Y[k], label=labels[k], color=col, linewidth=float(lws[k]))
 
     if any(lab is not None for lab in labels):
-        ax.legend(loc='best')
-    ax.set_xlabel('x')
-    ax.set_ylabel('y')
-    ax.set_title('Curves' if K == 1 else 'Overlay of Curves')
+        ax.legend(loc='upper right', fontsize=15, labelspacing=0.35)
+    _style_axes(ax, x_label=x_label, y_label=y_label, title=title)
     ax.grid(True, alpha=0.2)
     return fig, ax
