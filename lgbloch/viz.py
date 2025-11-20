@@ -15,6 +15,7 @@ Performance notes
 from typing import Callable, Iterable, Optional, Sequence, Tuple, List, Union
 from concurrent.futures import ThreadPoolExecutor
 import os
+import sys
 import time
 import numpy as np
 import matplotlib.pyplot as plt
@@ -130,24 +131,14 @@ def boolean_grid(func: Callable[[float, float], Union[bool, Sequence[bool]]],
                 return [bool(func(x, y)) for (x, y) in chunk]
 
             with ThreadPoolExecutor(max_workers=n_workers) as ex:
-                futures = [ex.submit(_process_chunk, c) for c in chunks]
+                futures = [ex.submit(_process_chunk, chunk) for chunk in chunks]
                 total = len(futures)
-                t0 = time.time()
-                while True:
-                    done_count = sum(1 for f in futures if f.done())
-                    elapsed = time.time() - t0
-                    if done_count > 0:
-                        rate = done_count / elapsed
-                        rem = total - done_count
-                        eta = rem / rate if rate > 0 else 0
-                        eta_str = f"{eta:.1f}s"
-                    else:
-                        eta_str = "?"
-                    print(f"\r[Parallel] {done_count}/{total} chunks | {elapsed:.1f}s elapsed | ETA: {eta_str}   ", end="", flush=True)
-                    if done_count == total:
-                        break
-                    time.sleep(1.0)
-                print("") # Newline
+                completed = 0
+                while completed < total:
+                    completed = sum(1 for f in futures if f.done())
+                    print(f"\rProgress: {completed}/{total} chunks", end="", flush=True)
+                    time.sleep(0.1)
+                print()
                 chunk_results = [f.result() for f in futures]
             results = [item for sublist in chunk_results for item in sublist]
         else:
@@ -174,24 +165,14 @@ def boolean_grid(func: Callable[[float, float], Union[bool, Sequence[bool]]],
                 return [func(x, y) for (x, y) in chunk]
 
             with ThreadPoolExecutor(max_workers=n_workers) as ex:
-                futures = [ex.submit(_process_chunk, c) for c in chunks]
+                futures = [ex.submit(_process_chunk, chunk) for chunk in chunks]
                 total = len(futures)
-                t0 = time.time()
-                while True:
-                    done_count = sum(1 for f in futures if f.done())
-                    elapsed = time.time() - t0
-                    if done_count > 0:
-                        rate = done_count / elapsed
-                        rem = total - done_count
-                        eta = rem / rate if rate > 0 else 0
-                        eta_str = f"{eta:.1f}s"
-                    else:
-                        eta_str = "?"
-                    print(f"\r[Parallel] {done_count}/{total} chunks | {elapsed:.1f}s elapsed | ETA: {eta_str}   ", end="", flush=True)
-                    if done_count == total:
-                        break
-                    time.sleep(1.0)
-                print("") # Newline
+                completed = 0
+                while completed < total:
+                    completed = sum(1 for f in futures if f.done())
+                    print(f"\rProgress: {completed}/{total} chunks", end="", flush=True)
+                    time.sleep(0.1)
+                print()
                 chunk_results = [f.result() for f in futures]
             results = [item for sublist in chunk_results for item in sublist]
         else:

@@ -23,10 +23,11 @@ Notes
 """
 
 from dataclasses import dataclass
-from typing import Dict, Tuple
+from typing import Dict, Tuple, Union
 import numpy as np
 from sympy import Rational
 from sympy.physics.wigner import wigner_3j, wigner_6j
+from scipy.sparse import issparse, csr_matrix, csc_matrix, spmatrix, coo_matrix, dok_matrix, vstack as sparse_vstack
 
 __all__ = [
     "bloch_init",
@@ -233,8 +234,9 @@ class GeneralizedBlochVector:
 
     Parameters
     ----------
-    data : numpy.ndarray
-        One-dimensional complex array of length ``d**2``.
+    data : numpy.ndarray or scipy.sparse.spmatrix
+        One-dimensional complex array of length ``d**2``, or a sparse matrix
+        of shape ``(d**2, batch_size)``.
 
     Notes
     -----
@@ -242,7 +244,7 @@ class GeneralizedBlochVector:
     - Supports elementwise arithmetic and scalar broadcasting via operator overloads.
     - Use :meth:`to_matrix` / :meth:`from_matrix` to convert between operators and Bloch vectors.
     """
-    data: np.ndarray  # shape ((2j+1)^2,), complex
+    data: Union[np.ndarray, spmatrix]  # shape ((2j+1)^2,), complex
 
     # Prefer our arithmetic when mixed with NumPy arrays
     __array_priority__ = 1000
@@ -252,15 +254,34 @@ class GeneralizedBlochVector:
         _ensure_initialized()
         d = _bloch_dim   # type: ignore
         expected = d * d
-        if self.data.shape != (expected,):
-            raise ValueError(f"Expected vector of length {expected}, got {self.data.shape}.")
-        if self.data.dtype != complex:
-            self.data = self.data.astype(complex)
+        
+        if issparse(self.data):
+            if self.data.shape[0] != expected:
+                raise ValueError(f"Expected sparse vector with {expected} rows, got {self.data.shape}.")
+            # Sparse matrices handle dtype differently, usually fixed at creation.
+            # We can check if it's complex.
+            if not np.issubdtype(self.data.dtype, np.complexfloating):
+                 self.data = self.data.astype(complex)
+        else:
+            if self.data.ndim == 1:
+                if self.data.shape != (expected,):
+                    raise ValueError(f"Expected vector of length {expected}, got {self.data.shape}.")
+            elif self.data.ndim == 2:
+                if self.data.shape[0] != expected:
+                    raise ValueError(f"Expected vector with {expected} rows, got {self.data.shape}.")
+            else:
+                raise ValueError(f"Expected 1D or 2D array, got {self.data.ndim}D.")
+
+            if self.data.dtype != complex:
+                self.data = self.data.astype(complex)
 
     # ---- NumPy interop ----
     def __array__(self, dtype=None) -> np.ndarray:
         """Return the underlying data as a NumPy array (optionally cast)."""
-        arr = self.data
+        if issparse(self.data):
+            arr = self.data.toarray()
+        else:
+            arr = self.data
         return arr.astype(dtype) if dtype is not None else arr
 
     # ---- Helpers ----
@@ -270,22 +291,29 @@ class GeneralizedBlochVector:
         return np.isscalar(x) or isinstance(x, (np.generic,))
 
     @staticmethod
-    def _as_1d_array(x) -> np.ndarray | None:
+    def _as_1d_array(x) -> Union[np.ndarray, spmatrix, None]:
         """Coerce ``x`` to a 1D array of length ``d**2`` or return ``None``."""
+        d = _bloch_dim  # type: ignore
+        
+        if issparse(x):
+            # Accept (d^2, 1) or (1, d^2)
+            if x.shape == (d*d, 1) or x.shape == (1, d*d):
+                return x
+            return None
+
         try:
             arr = np.asarray(x)
         except Exception:
             return None
         if arr.ndim != 1:
             return None
-        d = _bloch_dim  # type: ignore
         if arr.shape[0] != d * d:
             return None
         return arr
 
     @classmethod
-    def _wrap_result(cls, arr: np.ndarray) -> "GeneralizedBlochVector":
-        """Wrap a 1D complex array, preserving subclass type (validates length)."""
+    def _wrap_result(cls, arr: Union[np.ndarray, spmatrix]) -> "GeneralizedBlochVector":
+        """Wrap a 1D complex array or sparse matrix, preserving subclass type."""
         return cls(arr)
 
     def copy(self) -> "GeneralizedBlochVector":
@@ -295,14 +323,21 @@ class GeneralizedBlochVector:
     def __repr__(self) -> str:
         """Compact string representation with logical shape and dtype."""
         d = _bloch_dim if _bloch_dim is not None else 0
-        return f"GeneralizedBlochVector(shape=({d*d if d else 0},), dtype=complex)"
+        shape_str = str(self.data.shape) if d else "(0,)"
+        return f"GeneralizedBlochVector(shape={shape_str}, dtype=complex)"
 
     @staticmethod
-    def zeros() -> "GeneralizedBlochVector":
-        """Return a zero Bloch vector for the current dimension ``d``."""
+    def zeros(batch_size: int = 0) -> "GeneralizedBlochVector":
+        """Return a zero Bloch vector for the current dimension ``d``.
+        
+        If batch_size > 0, returns a batch of zero vectors (d^2, batch_size).
+        Returns a sparse matrix (CSC) to save memory.
+        """
         _ensure_initialized()
         d = _bloch_dim   # type: ignore
-        return GeneralizedBlochVector(np.zeros((d * d,), dtype=complex))
+        # Always return 2D sparse matrix for consistency with sparse backend
+        cols = batch_size if batch_size > 0 else 1
+        return GeneralizedBlochVector(csc_matrix((d * d, cols), dtype=complex))
 
     @staticmethod
     def from_matrix(mat: np.ndarray) -> "GeneralizedBlochVector":
@@ -355,9 +390,15 @@ class GeneralizedBlochVector:
         if isinstance(other, GeneralizedBlochVector):
             return self._wrap_result(self.data + other.data)
         if self._is_scalar(other):
+            # Sparse + scalar -> dense (usually, unless scalar is 0)
+            # But if scalar is 0, it's no-op.
+            if other == 0:
+                return self.copy()
             return self._wrap_result(self.data + other)
         arr = self._as_1d_array(other)
         if arr is not None:
+            # If self.data is sparse and arr is dense, result is dense
+            # If arr is sparse (not handled by _as_1d_array currently), result sparse
             return self._wrap_result(self.data + arr)
         return NotImplemented
 
@@ -369,6 +410,8 @@ class GeneralizedBlochVector:
         if isinstance(other, GeneralizedBlochVector):
             return self._wrap_result(self.data - other.data)
         if self._is_scalar(other):
+            if other == 0:
+                return self.copy()
             return self._wrap_result(self.data - other)
         arr = self._as_1d_array(other)
         if arr is not None:
@@ -419,33 +462,33 @@ class GeneralizedBlochVector:
     # ---- In-place operators (mutating) ----
     def __iadd__(self, other):
         if isinstance(other, GeneralizedBlochVector):
-            self.data += other.data
+            self.data = self.data + other.data
             return self
         if self._is_scalar(other):
-            self.data += other
+            self.data = self.data + other
             return self
         arr = self._as_1d_array(other)
         if arr is not None:
-            self.data += arr
+            self.data = self.data + arr
             return self
         return NotImplemented
 
     def __isub__(self, other):
         if isinstance(other, GeneralizedBlochVector):
-            self.data -= other.data
+            self.data = self.data - other.data
             return self
         if self._is_scalar(other):
-            self.data -= other
+            self.data = self.data - other
             return self
         arr = self._as_1d_array(other)
         if arr is not None:
-            self.data -= arr
+            self.data = self.data - arr
             return self
         return NotImplemented
 
     def __imul__(self, other):
         if self._is_scalar(other):
-            self.data *= other
+            self.data = self.data * other
             return self
         if isinstance(other, GeneralizedBlochVector):
             prod = bloch_tensor_product(self, other)
@@ -461,7 +504,7 @@ class GeneralizedBlochVector:
     def __itruediv__(self, other):
         # Only scalar division is supported
         if self._is_scalar(other):
-            self.data /= other
+            self.data = self.data / other
             return self
         return NotImplemented
 
@@ -600,8 +643,10 @@ def basis_product(kq1: Tuple[int, int], kq2: Tuple[int, int]) -> "GeneralizedBlo
     # Handle identity cases: T00 = I/sqrt(d) so T00*T = T*T00 = (1/sqrt(d)) T
     if k1 == 0 or k2 == 0:
         n = _idx_from_kq(k1 + k2, q1 + q2)
-        vec[n] = 1.0 / np.sqrt(d)
-        return GeneralizedBlochVector(vec)
+        # Return sparse vector
+        val = 1.0 / np.sqrt(d)
+        sp_vec = coo_matrix(([val], ([n], [0])), shape=(d*d, 1), dtype=complex).tocsc()
+        return GeneralizedBlochVector(sp_vec)
     
     q3 = q1 + q2
     n1, n2 = _idx_from_kq(k1, q1), _idx_from_kq(k2, q2)
@@ -615,14 +660,31 @@ def basis_product(kq1: Tuple[int, int], kq2: Tuple[int, int]) -> "GeneralizedBlo
     
     # Expand to full vector; only k3 in allowed range, q3=q1+q2
     k3_min, k3_max = max(abs(k1 - k2), abs(q3)), min(k1 + k2, d - 1)
+    
+    # Construct sparse vector directly
+    rows = []
+    data = []
+    
     for idx, k3 in enumerate(range(k3_min, k3_max + 1)):
         n = _idx_from_kq(k3, q3)
         if n1 > n2:
             sign = (-1) ** (k1 + k2 + k3)
         else:
             sign = 1.0
-        vec[n] = sign * coeffs[idx]
-    return GeneralizedBlochVector(vec)
+        val = sign * coeffs[idx]
+        if val != 0:
+            rows.append(n)
+            data.append(val)
+            
+    if not rows:
+        return GeneralizedBlochVector.zeros()
+        
+    # Create sparse column vector (d^2, 1)
+    # Use COO for construction
+    cols = np.zeros(len(rows), dtype=int)
+    sp_vec = coo_matrix((data, (rows, cols)), shape=(d*d, 1), dtype=complex).tocsc()
+    
+    return GeneralizedBlochVector(sp_vec)
 
 def structure_const(kq1: Tuple[int, int], kq2: Tuple[int, int]) -> "GeneralizedBlochVector":
     """Return Bloch vector of commutator coefficients.
@@ -634,20 +696,93 @@ def structure_const(kq1: Tuple[int, int], kq2: Tuple[int, int]) -> "GeneralizedB
     _ensure_initialized()
     return basis_product(kq1, kq2) - basis_product(kq2, kq1)
 
-def bloch_inner_product(u: GeneralizedBlochVector, v: GeneralizedBlochVector) -> complex:
+def bloch_inner_product(u: GeneralizedBlochVector, v: GeneralizedBlochVector) -> Union[complex, np.ndarray]:
     """Complex inner product ``<u, v>`` between two Bloch vectors.
 
     Parameters
     ----------
     u, v : GeneralizedBlochVector
-        Bloch-space vectors of length ``d**2``.
+        Bloch-space vectors of length ``d**2``. Can be batched (2D arrays).
 
     Returns
     -------
-    complex
-        The value ``np.vdot(u.data, v.data)``.
+    complex or numpy.ndarray
+        The value ``np.vdot(u.data, v.data)`` for 1D inputs.
+        For batched inputs, returns an array of inner products (element-wise along batch dimension).
+        If shapes allow broadcasting (e.g. 1D vs 2D), broadcasting is applied.
     """
-    return np.vdot(u.data, v.data)
+    d1 = u.data
+    d2 = v.data
+    
+    # Handle sparse matrices
+    is_sparse_1 = issparse(d1)
+    is_sparse_2 = issparse(d2)
+    
+    if is_sparse_1 or is_sparse_2:
+        # Ensure both are sparse for efficient operation, or handle mixed
+        # scipy.sparse multiply is elementwise
+        # We want sum(conj(d1) * d2, axis=0)
+        
+        # Convert 1D arrays to column vectors for consistency if mixed
+        if not is_sparse_1 and d1.ndim == 1:
+            d1 = d1[:, np.newaxis]
+        if not is_sparse_2 and d2.ndim == 1:
+            d2 = d2[:, np.newaxis]
+            
+        # Conjugate
+        d1_conj = d1.conj()
+        
+        # Elementwise multiplication
+        # If both are sparse, .multiply() returns sparse
+        # If one is dense, * usually returns dense (numpy broadcasting)
+        if is_sparse_1 and is_sparse_2:
+            prod = d1_conj.multiply(d2)
+        elif is_sparse_1:
+            # sparse.multiply(dense) -> sparse (usually) or dense?
+            # CSR multiply dense -> dense usually
+            prod = d1_conj.multiply(d2) 
+        else:
+            # dense * sparse -> dense
+            prod = d1_conj * d2
+            
+        # Sum along axis 0
+        res = np.sum(prod, axis=0)
+        
+        # Result might be matrix (1, N) or (1, 1) if sparse sum used
+        if issparse(res):
+            res = res.toarray().flatten()
+        else:
+            res = np.asarray(res).flatten()
+            
+        if res.size == 1:
+            return res.item()
+        return res
+
+    # Fast path for simple 1D vectors (dense)
+    if d1.ndim == 1 and d2.ndim == 1:
+        return np.vdot(d1, d2)
+        
+    # Handle batching/broadcasting (dense)
+    # Ensure at least 2D for consistent axis logic: (features, batch)
+    if d1.ndim == 1:
+        d1 = d1[:, np.newaxis]
+    if d2.ndim == 1:
+        d2 = d2[:, np.newaxis]
+        
+    # Check feature dimension match
+    if d1.shape[0] != d2.shape[0]:
+        raise ValueError(f"Feature dimension mismatch: {d1.shape[0]} vs {d2.shape[0]}")
+        
+    # Compute element-wise inner product along axis 0 (features)
+    # <u, v> = sum(conj(u_i) * v_i)
+    res = np.sum(np.conj(d1) * d2, axis=0)
+    
+    # If result is effectively a scalar (1-element array), return scalar?
+    # np.vdot returns scalar. To be consistent:
+    if res.size == 1:
+        return res.item()
+        
+    return res
 
 def bloch_tensor_product(u: GeneralizedBlochVector,
                      v: GeneralizedBlochVector,
@@ -658,6 +793,7 @@ def bloch_tensor_product(u: GeneralizedBlochVector,
     ----------
     u, v : GeneralizedBlochVector
         Bloch-space vectors representing operators ``A`` and ``B``.
+        Must be 1D (single operators), batching is not currently supported.
     tol : float, optional
         Components with absolute value ``<= tol`` are treated as zero.
 
@@ -672,20 +808,40 @@ def bloch_tensor_product(u: GeneralizedBlochVector,
     ``p,q`` nonzero terms. Coefficients drawn from :func:`basis_product` cache.
     """
     _ensure_initialized()
+    
+    if u.data.ndim > 1 and u.data.shape[1] > 1:
+         raise NotImplementedError("bloch_tensor_product does not support batched vectors.")
+    if v.data.ndim > 1 and v.data.shape[1] > 1:
+         raise NotImplementedError("bloch_tensor_product does not support batched vectors.")
 
-    idx_r = np.flatnonzero(np.abs(u.data) > tol)   # non-zero indices
-    idx_s = np.flatnonzero(np.abs(v.data) > tol)   # non-zero indices
+    # Extract non-zero elements efficiently
+    if issparse(u.data):
+        u_coo = u.data.tocoo()
+        # Filter by tol
+        mask = np.abs(u_coo.data) > tol
+        idx_r = u_coo.row[mask]
+        ru = u_coo.data[mask]
+    else:
+        idx_r = np.flatnonzero(np.abs(u.data) > tol)
+        ru = u.data[idx_r]
+
+    if issparse(v.data):
+        v_coo = v.data.tocoo()
+        mask = np.abs(v_coo.data) > tol
+        idx_s = v_coo.row[mask]
+        sv = v_coo.data[mask]
+    else:
+        idx_s = np.flatnonzero(np.abs(v.data) > tol)
+        sv = v.data[idx_s]
+
     if idx_r.size == 0 or idx_s.size == 0:
         return GeneralizedBlochVector.zeros()
-
-    ru = u.data[idx_r]
-    sv = v.data[idx_s]
 
     kq_r = [_kq_from_idx(int(n)) for n in idx_r]
     kq_s = [_kq_from_idx(int(n)) for n in idx_s]
 
     # Cache product coefficient vectors to avoid repeated expansion
-    bloch_vec_cache: dict[tuple[int,int,int,int], np.ndarray] = {}
+    bloch_vec_cache: dict[tuple[int,int,int,int], Union[np.ndarray, spmatrix]] = {}
     bloch_vecs = []
     weights = []
 
@@ -697,21 +853,62 @@ def bloch_tensor_product(u: GeneralizedBlochVector,
             # Get or compute the bloch vector
             bloch_vec = bloch_vec_cache.get(key)
             if bloch_vec is None:
+                # basis_product now returns GeneralizedBlochVector wrapping sparse
                 bloch_vec = basis_product((k1, q1), (k2, q2)).data
                 bloch_vec_cache[key] = bloch_vec
-            # Skip zero vectors
-            if np.any(bloch_vec):
+            
+            # Check if zero (sparse or dense)
+            is_nonzero = False
+            if issparse(bloch_vec):
+                if bloch_vec.nnz > 0:
+                    is_nonzero = True
+            elif np.any(bloch_vec):
+                is_nonzero = True
+                
+            if is_nonzero:
                 bloch_vecs.append(bloch_vec)
                 weights.append(r * s)
 
-    if not weights:  # all commutators zero
+    if not weights:  # all products zero
         return GeneralizedBlochVector.zeros()
 
-    coeff_mat = np.vstack(bloch_vecs)      # shape: (P, D)
-    weights_vec = np.asarray(weights)      # shape: (P,)
-    out = weights_vec @ coeff_mat          # (D,)
-
-    return GeneralizedBlochVector(out)
+    # Stack vectors
+    # bloch_vecs contains a mix of sparse and dense? 
+    # basis_product returns sparse now.
+    # If we have sparse vectors, use sparse_vstack (which stacks vertically, i.e. rows)
+    # But we want to sum: sum(weight_i * vec_i)
+    # This is equivalent to: Matrix * Weights
+    # If we stack vectors as columns: (D, P) @ (P, 1) -> (D, 1)
+    # sparse_hstack stacks columns.
+    
+    from scipy.sparse import hstack as sparse_hstack
+    
+    # Ensure all are sparse for efficient stacking
+    # basis_product returns sparse, so they should be sparse.
+    
+    # Check first element
+    if issparse(bloch_vecs[0]):
+        coeff_mat = sparse_hstack(bloch_vecs) # (D, P)
+        weights_vec = csc_matrix(np.asarray(weights)[:, np.newaxis]) # (P, 1)
+        out = coeff_mat @ weights_vec # (D, 1) sparse
+        return GeneralizedBlochVector(out)
+    else:
+        # Fallback for dense
+        coeff_mat = np.vstack(bloch_vecs).T # (D, P) - vstack stacks as rows, so transpose
+        # Wait, original code:
+        # coeff_mat = np.vstack(bloch_vecs)      # shape: (P, D)
+        # weights_vec = np.asarray(weights)      # shape: (P,)
+        # out = weights_vec @ coeff_mat          # (D,)
+        # This was summing rows weighted by weights.
+        
+        # If we use sparse_hstack, we get (D, P).
+        # We want sum(w_i * col_i).
+        # This is Mat @ w.
+        
+        coeff_mat = np.vstack(bloch_vecs) # (P, D)
+        weights_vec = np.asarray(weights) # (P,)
+        out = weights_vec @ coeff_mat # (D,)
+        return GeneralizedBlochVector(out)
 
 def bloch_commutator(u: GeneralizedBlochVector,
                      v: GeneralizedBlochVector,
@@ -722,6 +919,7 @@ def bloch_commutator(u: GeneralizedBlochVector,
     ----------
     u, v : GeneralizedBlochVector
         Bloch-space vectors representing operators ``A`` and ``B``.
+        Must be 1D (single operators), batching is not currently supported.
     tol : float, optional
         Components with absolute value ``<= tol`` are treated as zero.
 
@@ -736,20 +934,37 @@ def bloch_commutator(u: GeneralizedBlochVector,
     vectorizes the accumulation over nonzero components.
     """
     _ensure_initialized()
+    
+    if u.data.ndim > 1 and u.data.shape[1] > 1:
+        raise NotImplementedError("bloch_commutator does not support batched vectors.")
 
-    idx_u = np.flatnonzero(np.abs(u.data) > tol)
-    idx_v = np.flatnonzero(np.abs(v.data) > tol)
+    # Extract non-zero elements efficiently
+    if issparse(u.data):
+        u_coo = u.data.tocoo()
+        mask = np.abs(u_coo.data) > tol
+        idx_u = u_coo.row[mask]
+        ru = u_coo.data[mask]
+    else:
+        idx_u = np.flatnonzero(np.abs(u.data) > tol)
+        ru = u.data[idx_u]
+
+    if issparse(v.data):
+        v_coo = v.data.tocoo()
+        mask = np.abs(v_coo.data) > tol
+        idx_v = v_coo.row[mask]
+        sv = v_coo.data[mask]
+    else:
+        idx_v = np.flatnonzero(np.abs(v.data) > tol)
+        sv = v.data[idx_v]
+
     if idx_u.size == 0 or idx_v.size == 0:
         return GeneralizedBlochVector.zeros()
-
-    ru = u.data[idx_u]
-    sv = v.data[idx_v]
 
     kq_u = [_kq_from_idx(int(n)) for n in idx_u]
     kq_v = [_kq_from_idx(int(n)) for n in idx_v]
 
     # Cache commutator coefficients to avoid repeated expansion
-    coeff_cache: dict[tuple[int,int,int,int], np.ndarray] = {}
+    coeff_cache: dict[tuple[int,int,int,int], Union[np.ndarray, spmatrix]] = {}
     coeff_rows = []
     weights = []
 
@@ -763,19 +978,36 @@ def bloch_commutator(u: GeneralizedBlochVector,
             if cvec is None:
                 cvec = structure_const((k1, q1), (k2, q2)).data
                 coeff_cache[key] = cvec
+            
             # Skip zero vectors
-            if np.any(cvec):
+            is_nonzero = False
+            if issparse(cvec):
+                if cvec.nnz > 0:
+                    is_nonzero = True
+            elif np.any(cvec):
+                is_nonzero = True
+                
+            if is_nonzero:
                 coeff_rows.append(cvec)
                 weights.append(r * s)
 
     if not weights:  # all commutators zero
         return GeneralizedBlochVector.zeros()
 
-    coeff_mat = np.vstack(coeff_rows)      # shape: (P, D)
-    weights_vec = np.asarray(weights)      # shape: (P,)
-    out = weights_vec @ coeff_mat          # (D,)
-
-    return GeneralizedBlochVector(out)
+    # Stack vectors
+    from scipy.sparse import hstack as sparse_hstack
+    
+    if issparse(coeff_rows[0]):
+        coeff_mat = sparse_hstack(coeff_rows) # (D, P)
+        # Convert weights to sparse to ensure sparse result
+        weights_vec = csc_matrix(np.asarray(weights)[:, np.newaxis]) # (P, 1)
+        out = coeff_mat @ weights_vec # (D, 1) sparse
+        return GeneralizedBlochVector(out)
+    else:
+        coeff_mat = np.vstack(coeff_rows).T      # shape: (D, P)
+        weights_vec = np.asarray(weights)      # shape: (P,)
+        out = coeff_mat @ weights_vec          # (D,)
+        return GeneralizedBlochVector(out)
 
 def bloch_hermitian_transpose(r: GeneralizedBlochVector) -> GeneralizedBlochVector:
     """Hermitian transpose in Bloch space.
@@ -792,14 +1024,103 @@ def bloch_hermitian_transpose(r: GeneralizedBlochVector) -> GeneralizedBlochVect
     """
     _ensure_initialized()
     d = _bloch_dim  # type: ignore
-    s = np.zeros((d * d,), dtype=complex)
-    # q = 0 terms
-    for k in range(0, d):
-        s[_idx_from_kq(k, 0)] = np.conj(r.data[_idx_from_kq(k, 0)])
-    # q != 0 terms: fill positive and negative q simultaneously
-    for k in range(0, d):
-        for q in range(1, k + 1):
-            phase = (-1) ** q
-            s[_idx_from_kq(k, q)] = phase * np.conj(r.data[_idx_from_kq(k, -q)])
-            s[_idx_from_kq(k, -q)] = phase * np.conj(r.data[_idx_from_kq(k, q)])
+    
+    if issparse(r.data):
+        # Sparse implementation
+        # We need to permute rows: row for (k, q) <-> row for (k, -q)
+        # And apply phases and conjugation.
+        # Constructing a permutation matrix might be cleanest but maybe slow?
+        # Or just constructing COO data directly.
+        
+        # For now, convert to dense if small? No, user said "inherently sparse".
+        # Let's use row slicing and stacking.
+        
+        # Optimization: Precompute permutation indices and phases once per dimension?
+        # For now, just do the loop.
+        
+        # We need to construct a new sparse matrix.
+        # LIL format is good for construction.
+        s = r.data.tolil() # Copy structure
+        # But we are swapping rows, so in-place modification of LIL is okay-ish?
+        # Actually, we are mapping r -> s.
+        
+        # Let's use a list of rows and vstack?
+        # Or better: compute the permutation vector P and phase vector Ph.
+        # s = Ph * (P @ r.data.conj())
+        
+        # Let's build P and Ph on the fly (or cache them in future).
+        rows = []
+        cols = []
+        vals = []
+        phases = []
+        
+        # Map: old_row -> new_row
+        # s_new = phase * conj(r_old)
+        # s[new_idx] = phase * conj(r[old_idx])
+        # So we want to move data FROM old_idx TO new_idx.
+        # P[new, old] = 1.
+        
+        perm_indices = np.zeros(d*d, dtype=int)
+        phase_vec = np.zeros(d*d, dtype=complex)
+        
+        for k in range(0, d):
+            # q=0
+            idx0 = _idx_from_kq(k, 0)
+            perm_indices[idx0] = idx0
+            phase_vec[idx0] = 1.0
+            
+            for q in range(1, k + 1):
+                idx_pos = _idx_from_kq(k, q)
+                idx_neg = _idx_from_kq(k, -q)
+                phase = (-1) ** q
+                
+                # s[idx_pos] comes from r[idx_neg]
+                perm_indices[idx_pos] = idx_neg
+                phase_vec[idx_pos] = phase
+                
+                # s[idx_neg] comes from r[idx_pos]
+                perm_indices[idx_neg] = idx_pos
+                phase_vec[idx_neg] = phase
+                
+        # Apply permutation and phase
+        # s = diag(phase) @ r.data[perm_indices, :].conj()
+        # Sparse indexing r.data[perm_indices, :] works
+        
+        s_data = r.data[perm_indices, :].conj()
+        # Apply phases (row-wise multiplication)
+        # sparse.diags(phase_vec) @ s_data
+        from scipy.sparse import diags
+        P_mat = diags(phase_vec)
+        s_final = P_mat @ s_data
+        
+        return GeneralizedBlochVector(s_final)
+
+    if r.data.ndim == 1:
+        s = np.zeros((d * d,), dtype=complex)
+        # q = 0 terms
+        for k in range(0, d):
+            s[_idx_from_kq(k, 0)] = np.conj(r.data[_idx_from_kq(k, 0)])
+        # q != 0 terms
+        for k in range(0, d):
+            for q in range(1, k + 1):
+                phase = (-1) ** q
+                s[_idx_from_kq(k, q)] = phase * np.conj(r.data[_idx_from_kq(k, -q)])
+                s[_idx_from_kq(k, -q)] = phase * np.conj(r.data[_idx_from_kq(k, q)])
+    else:
+        # Vectorized for batch dimension
+        N = r.data.shape[1]
+        s = np.zeros((d * d, N), dtype=complex)
+        # q = 0 terms
+        for k in range(0, d):
+            idx = _idx_from_kq(k, 0)
+            s[idx, :] = np.conj(r.data[idx, :])
+        # q != 0 terms
+        for k in range(0, d):
+            for q in range(1, k + 1):
+                phase = (-1) ** q
+                idx_pos = _idx_from_kq(k, q)
+                idx_neg = _idx_from_kq(k, -q)
+                s[idx_pos, :] = phase * np.conj(r.data[idx_neg, :])
+                s[idx_neg, :] = phase * np.conj(r.data[idx_pos, :])
+                
     return GeneralizedBlochVector(s)

@@ -25,6 +25,8 @@ from .basis import (
     GeneralizedBlochVector,
     bloch_inner_product,
     bloch_hermitian_transpose,
+    bloch_commutator,
+    bloch_tensor_product,
 )
 from .evolution import (
     GeneralizedBlochHamiltonian,

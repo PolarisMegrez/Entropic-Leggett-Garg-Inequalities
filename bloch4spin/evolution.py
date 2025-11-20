@@ -35,7 +35,7 @@ Public API
 """
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Union
 from collections import OrderedDict
 import numpy as np
 from scipy.sparse import csr_matrix, isspmatrix_csr
@@ -470,7 +470,7 @@ class GeneralizedBlochState(GeneralizedBlochVector):
         if not np.allclose(self.data, s.data, rtol=1e-10, atol=1e-10):
             raise ValueError("Density Matrix must be Hermitian in operator space.")
 
-    def normalization(self) -> complex:
+    def normalization(self) -> Union[complex, np.ndarray]:
         """Normalize the Bloch state so that ``Tr(ρ)=1``.
 
         Ensures the density operator trace equals unity by rescaling the Bloch
@@ -482,7 +482,7 @@ class GeneralizedBlochState(GeneralizedBlochVector):
 
         Returns
         -------
-        complex
+        complex or numpy.ndarray
             Scaling factor applied in-place to ``self.data``.
 
         Raises
@@ -497,12 +497,41 @@ class GeneralizedBlochState(GeneralizedBlochVector):
         """
         d = bloch_dim()
         target = 1.0 / np.sqrt(d)
-        r00 = self.data[0]
-        if r00 == 0:
-            raise ValueError("Cannot normalize: r_{00} is zero.")
-        scale = target / r00
-        self.data *= scale
-        return scale
+        
+        if issparse(self.data):
+            # Sparse batch normalization
+            # r00 is the first row (index 0)
+            r00 = self.data[0, :].toarray().flatten() # Convert just the first row to dense for calculation
+            
+            # Avoid division by zero
+            scale = np.zeros_like(r00)
+            mask = r00 != 0
+            scale[mask] = target / r00[mask]
+            
+            # Apply scaling: self.data = self.data * diag(scale)
+            # self.data is (d^2, N), scale is (N,)
+            # We want to multiply each column j by scale[j].
+            # This is equivalent to right-multiplying by a diagonal matrix.
+            from scipy.sparse import diags
+            S = diags(scale)
+            self.data = self.data @ S
+            return scale
+
+        if self.data.ndim == 1:
+            r00 = self.data[0]
+            if r00 == 0:
+                raise ValueError("Cannot normalize: r_{00} is zero.")
+            scale = target / r00
+            self.data *= scale
+            return scale
+        else:
+            # Batch normalization (dense)
+            r00 = self.data[0, :]
+            scale = np.zeros_like(r00)
+            mask = r00 != 0
+            scale[mask] = target / r00[mask]
+            self.data *= scale[np.newaxis, :]
+            return scale
 
     @staticmethod
     def from_matrix(mat: np.ndarray) -> "GeneralizedBlochState":
@@ -572,6 +601,7 @@ class GeneralizedBlochState(GeneralizedBlochVector):
             self.data = mat @ self.data
         else:
             # Use SciPy's stable expm_multiply (required dependency)
+            # expm_multiply supports B as a matrix (columns are vectors)
             self.data = expm_multiply(L.data * t, self.data)
         # Light Hermiticity symmetrization to curb roundoff drift
         try:

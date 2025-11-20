@@ -33,6 +33,7 @@ Notes
 from typing import List, Tuple
 import warnings
 import numpy as np
+from scipy.sparse import issparse, hstack as sparse_hstack
 
 from .evolution import GeneralizedBlochEvolutionMatrix, GeneralizedBlochState
 from .observable import GeneralizedBlochObservable, apply_measurement
@@ -75,18 +76,11 @@ def run(L: GeneralizedBlochEvolutionMatrix,
     -------
     numpy.ndarray
         Joint probability ndarray with shape ``(M1, M2, ..., Mk)`` where ``Mi``
-        is the number of outcomes at measurement step ``i`` (after filtering and
-        sorting by time, and ignoring steps earlier than ``t0``). If no steps
-        remain, returns ``np.array([1.0])``.
+        is the number of outcomes at measurement step ``i``.
 
-        Notes
-        -----
-        - Branching is handled explicitly by duplicating state objects per outcome.
-        - Joint probability for a path ``(i_1,\dots,i_K)`` equals
-            ``\sqrt{d}`` times the ``r_{00}`` coordinate of the unnormalized state
-            after composing interleaved evolutions and measurement superoperators.
-        - For large branching factors, consider a sparse dictionary over paths for
-            efficiency.
+    Notes
+    -----
+    - Uses vectorized batch evolution for performance.
     """
     if not schedule:
         return np.array([1.0], dtype=float)
@@ -101,44 +95,88 @@ def run(L: GeneralizedBlochEvolutionMatrix,
     steps.sort(key=lambda x: x[0])
 
     # Prepare shapes and timeline
-    times = [t for (t, _) in steps]
     outcomes_per_step = [len(obs) for (_, obs) in steps]
 
-    # Initialize branch list with initial state
-    branches: List[Tuple[tuple, float, GeneralizedBlochState]] = [
-        (tuple(), 1.0, init_state.copy())
-    ]
+    # Initialize batch: single branch
+    # current_state: GeneralizedBlochState with shape (d^2, N_branches)
+    # current_probs: (N_branches,)
+    # current_paths: list of tuples (length N_branches)
+    
+    # Ensure init_state is a copy and 1D-ish (d^2,) or (d^2, 1)
+    current_state = init_state.copy()
+    if current_state.data.ndim == 1:
+        current_state.data = current_state.data[:, np.newaxis]
+    
+    current_probs = np.array([1.0], dtype=float)
+    current_paths = [()]
 
-    # Iterate steps
     last_time = t0
+    
     for step_idx, (t, obs_list) in enumerate(steps):
         dt = float(t - last_time)
         last_time = t
-        new_branches: List[Tuple[tuple, float, GeneralizedBlochState]] = []
-        for path, prob, st in branches:
-            # Evolve to current time
-            st_t = _evolve_state(st, L, dt)
-            # Measure -> returns list of (p_i, post_state_i)
-            results = apply_measurement(obs_list, st_t, norm_mode=norm_mode)
-            for i, (p_i, st_i) in enumerate(results):
-                if p_i <= 0.0:
-                    continue  # prune zero-probability branches
-                new_path = path + (i,)
-                new_prob = prob * p_i
-                new_branches.append((new_path, new_prob, st_i))
-        branches = new_branches
-        if not branches:
-            # All branches pruned
+        
+        # 1. Evolve all branches
+        if dt > 0:
+            current_state.evolve(L, dt)
+        
+        # 2. Apply measurements -> returns list of (probs_vec, state_obj)
+        # Each element i corresponds to outcome i
+        results = apply_measurement(obs_list, current_state, norm_mode=norm_mode)
+        
+        next_state_cols = []
+        next_probs = []
+        next_paths = []
+        
+        # 3. Expand branches
+        for outcome_idx, (p_vec, s_obj) in enumerate(results):
+            # p_vec: (N_branches,)
+            # s_obj: (d^2, N_branches)
+            
+            # Calculate new path probabilities
+            new_p = current_probs * p_vec
+            
+            # Prune zero probability branches
+            mask = new_p > 0
+            if not np.any(mask):
+                continue
+                
+            # Append surviving columns
+            next_state_cols.append(s_obj.data[:, mask])
+            next_probs.append(new_p[mask])
+            
+            # Update paths
+            # We need to map back to which parent path generated this
+            parent_indices = np.flatnonzero(mask)
+            for pid in parent_indices:
+                next_paths.append(current_paths[pid] + (outcome_idx,))
+        
+        if not next_state_cols:
+            # All branches died
             shape = tuple(outcomes_per_step[: step_idx + 1])
             return np.zeros(shape, dtype=float)
+            
+        # 4. Reassemble batch
+        # Optimization: Use list comprehension and hstack which is generally efficient.
+        # Memory warning: For very deep trees or high branching, this can grow large.
+        # Pruning (mask) above is essential.
+        
+        # Check if we are dealing with sparse matrices
+        if issparse(next_state_cols[0]):
+            current_state = GeneralizedBlochState(sparse_hstack(next_state_cols))
+        else:
+            current_state = GeneralizedBlochState(np.hstack(next_state_cols))
+            
+        current_probs = np.concatenate(next_probs)
+        current_paths = next_paths
 
     # Assemble joint probability ndarray
     shape = tuple(outcomes_per_step)
     joint = np.zeros(shape, dtype=float)
-    for path, prob, _ in branches:
-        joint[path] = joint[path] + prob
+    for path, prob in zip(current_paths, current_probs):
+        joint[path] += prob
 
-    # Numerical cleanup: ensure total sums to ~1 for normalized/renormalized
+    # Numerical cleanup
     total = float(np.sum(joint))
     if norm_mode in ("normalized", "renormalized") and total > 0:
         joint = joint / total

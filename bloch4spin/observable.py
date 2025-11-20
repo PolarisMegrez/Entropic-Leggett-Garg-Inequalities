@@ -221,8 +221,8 @@ def apply_measurement(observables: list[GeneralizedBlochObservable],
     -------
     list of tuple
         For each observable ``L_i`` a tuple ``(p_i, post_state_i)`` where
-        ``p_i`` is the outcome probability and ``post_state_i`` the normalized
-        Bloch state after the measurement.
+        ``p_i`` is the outcome probability (scalar or array) and ``post_state_i`` 
+        the normalized Bloch state after the measurement.
 
     Notes
     -----
@@ -233,13 +233,14 @@ def apply_measurement(observables: list[GeneralizedBlochObservable],
     """
     from .evolution import GeneralizedBlochState  # local import to avoid cycle
     d = bloch_dim()
-    out: list[tuple[float, GeneralizedBlochState]] = []
+    out: list[tuple[Union[float, np.ndarray], GeneralizedBlochState]] = []
     r_in = state.data
     sqrt_d = np.sqrt(d)
-    total_prob = 0.0
-    probs_tmp: list[float] = []
-    states_tmp: list[GeneralizedBlochState] = []
-
+    
+    # Prepare accumulators for renormalization
+    probs_tmp = []
+    states_tmp = []
+    
     # Optional completeness check using sum_i L_i[0,0] == 1
     if norm_mode not in ("normalized", "renormalized", "unnormalized"):
         raise ValueError("norm_mode must be 'normalized', 'renormalized', or 'unnormalized'.")
@@ -249,32 +250,54 @@ def apply_measurement(observables: list[GeneralizedBlochObservable],
             csum += float(np.real(obs.data[0, 0]))
         if not np.isclose(csum, 1.0, atol=10*atol):
             raise ValueError(f"Observable set not complete: sum L_i[0,0] = {csum} ≠ 1.")
+
+    # Calculate unnormalized updates
     for obs in observables:
-        r_prime = obs.data @ r_in  # unnormalized Bloch vector (numpy array)
-        p = (sqrt_d * r_prime[0]).real
-        if clip_negative and p < 0 and p > -atol:
-            p = 0.0
-        probs_tmp.append(p)
-        total_prob += p
-        if p > atol:
-            post = GeneralizedBlochState(r_prime)
-            # Enforce exact normalization (numerically) via method
-            post.normalization()
+        r_prime = obs.data @ r_in  # unnormalized Bloch vector(s)
+        
+        # Extract probability: sqrt(d) * r_prime[0]
+        if r_prime.ndim == 1:
+            p = (sqrt_d * r_prime[0]).real
+            if clip_negative and p < 0 and p > -atol:
+                p = 0.0
         else:
-            # Zero probability branch: keep vector but attempt normalization for consistency
-            post = GeneralizedBlochState(r_prime.copy())
-            # If zero vector or near-zero, leave as is; else try normalization guarded
-            try:
-                if np.abs(r_prime[0]) > atol:
-                    post.normalization()
-            except Exception:
-                pass
+            p = (sqrt_d * r_prime[0, :]).real
+            if clip_negative:
+                p[ (p < 0) & (p > -atol) ] = 0.0
+        
+        probs_tmp.append(p)
+        
+        # Create state object
+        post = GeneralizedBlochState(r_prime) # Copy implied if r_prime is new array
+        
+        # Normalize
+        # If p is small/zero, normalization might fail or be skipped
+        # We use the method's internal logic
+        try:
+            post.normalization()
+        except Exception:
+            pass
+            
         states_tmp.append(post)
-    # Optional global renormalization depending on norm_mode
-    if norm_mode == "renormalized" and total_prob > 0:
-        scale = 1.0 / total_prob
-        for i in range(len(probs_tmp)):
-            probs_tmp[i] *= scale
+
+    # Optional global renormalization
+    if norm_mode == "renormalized":
+        # Sum probabilities across outcomes
+        total_prob = sum(probs_tmp)
+        # Avoid division by zero
+        if np.isscalar(total_prob):
+            if total_prob > 0:
+                scale = 1.0 / total_prob
+                for i in range(len(probs_tmp)):
+                    probs_tmp[i] *= scale
+        else:
+            # Vectorized renormalization
+            scale = np.zeros_like(total_prob)
+            mask = total_prob > 0
+            scale[mask] = 1.0 / total_prob[mask]
+            for i in range(len(probs_tmp)):
+                probs_tmp[i] *= scale
+
     for p, st in zip(probs_tmp, states_tmp):
         out.append((p, st))
     return out
