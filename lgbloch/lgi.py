@@ -371,11 +371,25 @@ def wigner_LGI_dichotomic_three_point(jps: JointProbabilitySet) -> float:
     for A, B, C in permutations([1, 2, 3], 3):
         for x_idx in (0, 1):
             for y_idx in (0, 1):
-                for z_idx in (0,1):
+                for z_idx in (0, 1):
                     z_op_idx = 1 - z_idx
-                    p_Ax_By   = dist[tuple(sorted((A, B)))][x_idx, y_idx]
-                    p_Ax_Cz   = dist[tuple(sorted((A, C)))][x_idx, z_idx]
-                    p_By_Czop = dist[tuple(sorted((B, C)))][y_idx, z_op_idx]
+                    
+                    # Fix: Check time order to access correct array axes
+                    if A < B:
+                        p_Ax_By = dist[(A, B)][x_idx, y_idx]
+                    else:
+                        p_Ax_By = dist[(B, A)][y_idx, x_idx]
+
+                    if A < C:
+                        p_Ax_Cz = dist[(A, C)][x_idx, z_idx]
+                    else:
+                        p_Ax_Cz = dist[(C, A)][z_idx, x_idx]
+
+                    if B < C:
+                        p_By_Czop = dist[(B, C)][y_idx, z_op_idx]
+                    else:
+                        p_By_Czop = dist[(C, B)][z_op_idx, y_idx]
+
                     expr = p_Ax_Cz + p_By_Czop - p_Ax_By
                     values.append(float(expr))
     return float(min(values))
@@ -415,12 +429,31 @@ def wigner_LGI_dichotomic_four_point(jps: JointProbabilitySet) -> float:
     for A, B, C, D in permutations([1, 2, 3, 4], 4):
         for x_idx in (0, 1):
             for y_idx in (0, 1):
-                for z_idx in (0,1):
-                    z_op_idx = 1 - z_idx
-                    p_Ax_By   = dist[tuple(sorted((A, B)))][x_idx, y_idx]
-                    p_Ax_Cz   = dist[tuple(sorted((A, C)))][x_idx, z_idx]
-                    p_By_Dzop = dist[tuple(sorted((B, D)))][y_idx, z_op_idx]
-                    p_Czop_Dz = dist[tuple(sorted((C, D)))][z_op_idx, z_idx]
-                    expr = p_Ax_Cz + p_By_Dzop + p_Czop_Dz - p_Ax_By
-                    values.append(float(expr))
+                for i_idx in (0, 1):
+                    for j_idx in (0, 1):
+                        i_op_idx = 1 - i_idx
+                        j_op_idx = 1 - j_idx
+                        
+                        if A < B:
+                            p_Ax_By = dist[(A, B)][x_idx, y_idx]
+                        else:
+                            p_Ax_By = dist[(B, A)][y_idx, x_idx]
+
+                        if A < C:
+                            p_Ax_Ci = dist[(A, C)][x_idx, i_idx]
+                        else:
+                            p_Ax_Ci = dist[(C, A)][i_idx, x_idx]
+
+                        if B < D:
+                            p_By_Djop = dist[(B, D)][y_idx, j_op_idx]
+                        else:
+                            p_By_Djop = dist[(D, B)][j_op_idx, y_idx]
+
+                        if C < D:
+                            p_Ciop_Dj = dist[(C, D)][i_op_idx, j_idx]
+                        else:
+                            p_Ciop_Dj = dist[(D, C)][j_idx, i_op_idx]
+
+                        expr = p_Ax_Ci + p_By_Djop + p_Ciop_Dj - p_Ax_By
+                        values.append(float(expr))
     return float(min(values))

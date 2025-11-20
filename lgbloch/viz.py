@@ -15,6 +15,7 @@ Performance notes
 from typing import Callable, Iterable, Optional, Sequence, Tuple, List, Union
 from concurrent.futures import ThreadPoolExecutor
 import os
+import time
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.colors import ListedColormap, to_rgba
@@ -107,15 +108,48 @@ def boolean_grid(func: Callable[[float, float], Union[bool, Sequence[bool]]],
 
     # Helper to evaluate all remaining points, optionally threaded
     nj = _resolve_n_jobs(n_jobs)
+
+    def _get_coords():
+        return [(float(X_grid.flat[i]), float(Y_grid.flat[i])) for i in range(1, X_grid.size)]
+
     def eval_points_single():
         mask = np.zeros((n, n), dtype=bool)
         mask.flat[0] = bool(first)
         if X_grid.size == 1:
             return mask
-        coords = [(float(X_grid.flat[i]), float(Y_grid.flat[i])) for i in range(1, X_grid.size)]
+        coords = _get_coords()
         if int(nj) and nj > 1:
-            with ThreadPoolExecutor(max_workers=int(nj)) as ex:
-                results = list(ex.map(lambda xy: bool(func(*xy)), coords))
+            n_workers = int(nj)
+            # Chunking: split tasks to reduce ThreadPoolExecutor overhead
+            n_chunks = n_workers * 4
+            chunk_size = max(1, len(coords) // n_chunks)
+            chunks = [coords[i:i + chunk_size] for i in range(0, len(coords), chunk_size)]
+            print(f"Parallel execution: {len(chunks)} chunks (target {n_chunks}) on {n_workers} workers.")
+
+            def _process_chunk(chunk):
+                return [bool(func(x, y)) for (x, y) in chunk]
+
+            with ThreadPoolExecutor(max_workers=n_workers) as ex:
+                futures = [ex.submit(_process_chunk, c) for c in chunks]
+                total = len(futures)
+                t0 = time.time()
+                while True:
+                    done_count = sum(1 for f in futures if f.done())
+                    elapsed = time.time() - t0
+                    if done_count > 0:
+                        rate = done_count / elapsed
+                        rem = total - done_count
+                        eta = rem / rate if rate > 0 else 0
+                        eta_str = f"{eta:.1f}s"
+                    else:
+                        eta_str = "?"
+                    print(f"\r[Parallel] {done_count}/{total} chunks | {elapsed:.1f}s elapsed | ETA: {eta_str}   ", end="", flush=True)
+                    if done_count == total:
+                        break
+                    time.sleep(1.0)
+                print("") # Newline
+                chunk_results = [f.result() for f in futures]
+            results = [item for sublist in chunk_results for item in sublist]
         else:
             results = [bool(func(x, y)) for (x, y) in coords]
         mask.flat[1:] = np.array(results, dtype=bool)
@@ -127,10 +161,39 @@ def boolean_grid(func: Callable[[float, float], Union[bool, Sequence[bool]]],
             masks[k].flat[0] = bool(first_vals[k])
         if X_grid.size == 1:
             return masks
-        coords = [(float(X_grid.flat[i]), float(Y_grid.flat[i])) for i in range(1, X_grid.size)]
+        coords = _get_coords()
         if int(nj) and nj > 1:
-            with ThreadPoolExecutor(max_workers=int(nj)) as ex:
-                results = list(ex.map(func, [c[0] for c in coords], [c[1] for c in coords]))
+            n_workers = int(nj)
+            # Chunking: split tasks to reduce ThreadPoolExecutor overhead
+            n_chunks = n_workers * 4
+            chunk_size = max(1, len(coords) // n_chunks)
+            chunks = [coords[i:i + chunk_size] for i in range(0, len(coords), chunk_size)]
+            print(f"Parallel execution: {len(chunks)} chunks (target {n_chunks}) on {n_workers} workers.")
+
+            def _process_chunk(chunk):
+                return [func(x, y) for (x, y) in chunk]
+
+            with ThreadPoolExecutor(max_workers=n_workers) as ex:
+                futures = [ex.submit(_process_chunk, c) for c in chunks]
+                total = len(futures)
+                t0 = time.time()
+                while True:
+                    done_count = sum(1 for f in futures if f.done())
+                    elapsed = time.time() - t0
+                    if done_count > 0:
+                        rate = done_count / elapsed
+                        rem = total - done_count
+                        eta = rem / rate if rate > 0 else 0
+                        eta_str = f"{eta:.1f}s"
+                    else:
+                        eta_str = "?"
+                    print(f"\r[Parallel] {done_count}/{total} chunks | {elapsed:.1f}s elapsed | ETA: {eta_str}   ", end="", flush=True)
+                    if done_count == total:
+                        break
+                    time.sleep(1.0)
+                print("") # Newline
+                chunk_results = [f.result() for f in futures]
+            results = [item for sublist in chunk_results for item in sublist]
         else:
             results = [func(x, y) for (x, y) in coords]
         for idx, val in enumerate(results, start=1):
@@ -309,6 +372,10 @@ def plot_multioutput_curves(
     first = func(float(x_values[0]))
 
     nj = _resolve_n_jobs(n_jobs)
+
+    def _get_xs():
+        return [float(x) for x in x_values[1:]]
+
     if isinstance(first, (list, tuple, np.ndarray)):
         outs0 = list(first)
         K = len(outs0)
@@ -316,10 +383,20 @@ def plot_multioutput_curves(
         for k in range(K):
             Y[k, 0] = float(outs0[k])
         if x_values.size > 1:
-            xs = [float(x) for x in x_values[1:]]
+            xs = _get_xs()
             if int(nj) and nj > 1:
-                with ThreadPoolExecutor(max_workers=int(nj)) as ex:
-                    results = list(ex.map(func, xs))
+                n_workers = int(nj)
+                n_chunks = n_workers * 4
+                chunk_size = max(1, len(xs) // n_chunks)
+                chunks = [xs[i:i + chunk_size] for i in range(0, len(xs), chunk_size)]
+                print(f"Parallel execution: {len(chunks)} chunks (target {n_chunks}) on {n_workers} workers.")
+
+                def _process_chunk(chunk):
+                    return [func(x) for x in chunk]
+
+                with ThreadPoolExecutor(max_workers=n_workers) as ex:
+                    chunk_results = list(ex.map(_process_chunk, chunks))
+                results = [item for sublist in chunk_results for item in sublist]
             else:
                 results = [func(x) for x in xs]
             for i, vals in enumerate(results, start=1):
@@ -330,10 +407,20 @@ def plot_multioutput_curves(
         Y = np.zeros((1, x_values.size), dtype=float)
         Y[0, 0] = float(first)
         if x_values.size > 1:
-            xs = [float(x) for x in x_values[1:]]
+            xs = _get_xs()
             if int(nj) and nj > 1:
-                with ThreadPoolExecutor(max_workers=int(nj)) as ex:
-                    results = list(ex.map(func, xs))
+                n_workers = int(nj)
+                n_chunks = n_workers * 4
+                chunk_size = max(1, len(xs) // n_chunks)
+                chunks = [xs[i:i + chunk_size] for i in range(0, len(xs), chunk_size)]
+                print(f"Parallel execution: {len(chunks)} chunks (target {n_chunks}) on {n_workers} workers.")
+
+                def _process_chunk(chunk):
+                    return [func(x) for x in chunk]
+
+                with ThreadPoolExecutor(max_workers=n_workers) as ex:
+                    chunk_results = list(ex.map(_process_chunk, chunks))
+                results = [item for sublist in chunk_results for item in sublist]
             else:
                 results = [func(x) for x in xs]
             for i, val in enumerate(results, start=1):
