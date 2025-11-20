@@ -97,3 +97,5 @@ desktop.ini
 old/
 test*
 *.png
+*.pdf
+*.svg
