@@ -142,6 +142,10 @@ def run(L: GeneralizedBlochEvolutionMatrix,
                 continue
                 
             # Append surviving columns
+            if isinstance(s_obj.data, np.matrix):
+                # Convert matrix to array to avoid indexing issues
+                s_obj.data = np.asarray(s_obj.data)
+
             next_state_cols.append(s_obj.data[:, mask])
             next_probs.append(new_p[mask])
             

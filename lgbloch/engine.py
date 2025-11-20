@@ -5,6 +5,7 @@ from bloch4spin.basis import bloch_init, _idx_from_kq, GeneralizedBlochVector
 from bloch4spin.evolution import GeneralizedBlochEvolutionMatrix, GeneralizedBlochState
 from bloch4spin.observable import GeneralizedBlochObservable
 from bloch4spin.engine import run
+from scipy.sparse import dok_matrix
 
 __all__ = [
     "run_case",
@@ -17,12 +18,23 @@ def spin_ops(d: int):
     bloch_init(d)
     j = (d - 1) / 2.0
     c = np.sqrt((j*(j+1)*(2*j+1))/3)
-    Jz = GeneralizedBlochVector.zeros()
-    Jz.data[_idx_from_kq(1, 0)] = c
-    Jp = GeneralizedBlochVector.zeros()
-    Jp.data[_idx_from_kq(1, 1)] = -np.sqrt(2) * c
-    Jm = GeneralizedBlochVector.zeros()
-    Jm.data[_idx_from_kq(1, -1)] = np.sqrt(2) * c
+    
+    # Use dok_matrix for efficient single-element assignment
+    # Jz
+    Jz_data = dok_matrix((d*d, 1), dtype=complex)
+    Jz_data[_idx_from_kq(1, 0), 0] = c
+    Jz = GeneralizedBlochVector(Jz_data.tocsc())
+    
+    # Jp
+    Jp_data = dok_matrix((d*d, 1), dtype=complex)
+    Jp_data[_idx_from_kq(1, 1), 0] = -np.sqrt(2) * c
+    Jp = GeneralizedBlochVector(Jp_data.tocsc())
+    
+    # Jm
+    Jm_data = dok_matrix((d*d, 1), dtype=complex)
+    Jm_data[_idx_from_kq(1, -1), 0] = np.sqrt(2) * c
+    Jm = GeneralizedBlochVector(Jm_data.tocsc())
+    
     Jx = (Jp + Jm) / 2.0
     Jy = (Jp - Jm) / (2.0j)
     return Jx, Jy, Jz, Jp, Jm

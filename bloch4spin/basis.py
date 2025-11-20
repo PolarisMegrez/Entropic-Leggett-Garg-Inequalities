@@ -1,4 +1,4 @@
-"""COBITO Bloch basis and operations for spin-j systems.
+r"""COBITO Bloch basis and operations for spin-j systems.
 
 Provides utilities to work with the Canonical Orthonormal Basis of Irreducible
 Tensor Operators (COBITO) ``T_q^{(k)}`` for Hilbert space dimension ``d=2j+1``.
@@ -125,7 +125,7 @@ def _generate_tensor_basis(d: int, k: int, q: int,
 def _derive_tensor_product_coeff(d: int, k1: int, q1: int, k2: int, q2: int, k3: int, q3: int,
                                  w6_cache: Dict[Tuple[int, int, int], float],
                                  w3_cache: Dict[Tuple[int, int, int, int, int, int], float]) -> float:
-    """Return a single tensor-product coefficient.
+    r"""Return a single tensor-product coefficient.
 
     Coefficient ``c_{k1 k2 k3}^{q1 q2 q3}`` in the expansion
     ``T_{q1}^{(k1)} T_{q2}^{(k2)} = \sum_{k3,q3} c_{k1 k2 k3}^{q1 q2 q3} T_{q3}^{(k3)}``.
@@ -134,7 +134,7 @@ def _derive_tensor_product_coeff(d: int, k1: int, q1: int, k2: int, q2: int, k3:
     -----
     Condon–Shortley convention:
 
-    ``c = sqrt((2k1+1)(2k2+1)(2k3+1)) * (-1)^(2j+q3) * {k3 k2 k1; j j j} * (k3 k2 k1; -q3 q2 q1)``,
+    ``c = \sqrt{(2k1+1)(2k2+1)(2k3+1)} * (-1)^(2j+q3) * {k3 k2 k1; j j j} * (k3 k2 k1; -q3 q2 q1)``,
     with ``j=(d-1)/2``, where ``{...}`` is the Wigner 6j and ``(...)`` the Wigner 3j symbol.
     """
     pref = np.sqrt((2 * k1 + 1) * (2 * k2 + 1) * (2 * k3 + 1))
@@ -263,9 +263,15 @@ class GeneralizedBlochVector:
             if not np.issubdtype(self.data.dtype, np.complexfloating):
                  self.data = self.data.astype(complex)
         else:
+            # Ensure dense data is ndarray, not matrix
+            if isinstance(self.data, np.matrix):
+                self.data = np.asarray(self.data)
+                
             if self.data.ndim == 1:
                 if self.data.shape != (expected,):
                     raise ValueError(f"Expected vector of length {expected}, got {self.data.shape}.")
+                # Enforce column vector shape (N, 1) for consistency with sparse
+                self.data = self.data.reshape(-1, 1)
             elif self.data.ndim == 2:
                 if self.data.shape[0] != expected:
                     raise ValueError(f"Expected vector with {expected} rows, got {self.data.shape}.")
@@ -309,7 +315,7 @@ class GeneralizedBlochVector:
             return None
         if arr.shape[0] != d * d:
             return None
-        return arr
+        return arr.reshape(-1, 1)
 
     @classmethod
     def _wrap_result(cls, arr: Union[np.ndarray, spmatrix]) -> "GeneralizedBlochVector":
@@ -341,7 +347,7 @@ class GeneralizedBlochVector:
 
     @staticmethod
     def from_matrix(mat: np.ndarray) -> "GeneralizedBlochVector":
-        """Convert an operator matrix to its Bloch vector.
+        r"""Convert an operator matrix to its Bloch vector.
 
         Parameters
         ----------
@@ -362,15 +368,15 @@ class GeneralizedBlochVector:
         d = _bloch_dim   # type: ignore
         if mat.shape != (d, d):
             raise ValueError("Density/operator matrix has incompatible shape.")
-        r = np.zeros((d * d,), dtype=complex)
+        r = np.zeros((d * d, 1), dtype=complex)
         for k in range(0, d):
             for q in range(-k, k + 1):
                 T_kq = bloch_basis((k, q))
-                r[_idx_from_kq(k, q)] = np.trace(T_kq.T @ mat)
+                r[_idx_from_kq(k, q), 0] = np.trace(T_kq.T @ mat)
         return GeneralizedBlochVector(r)
 
     def to_matrix(self) -> np.ndarray:
-        """Reconstruct the operator matrix from Bloch coefficients.
+        r"""Reconstruct the operator matrix from Bloch coefficients.
 
         Returns
         -------
@@ -382,7 +388,11 @@ class GeneralizedBlochVector:
         mat = np.zeros((d, d), dtype=complex)
         for k in range(0, d):
             for q in range(-k, k + 1):
-                mat += self.data[_idx_from_kq(k, q)] * bloch_basis((k, q))
+                val = self.data[_idx_from_kq(k, q)]
+                # Handle (N, 1) shape indexing
+                if isinstance(val, np.ndarray) and val.size == 1:
+                    val = val.item()
+                mat += val * bloch_basis((k, q))
         return mat
 
     # ---- Arithmetic operators ----
@@ -610,25 +620,20 @@ def bloch_basis(kq: Tuple[int, int]) -> np.ndarray:
     return phase * T_pos.T
 
 def basis_product(kq1: Tuple[int, int], kq2: Tuple[int, int]) -> "GeneralizedBlochVector":
-    """Return Bloch vector for the product ``T_{q1}^{(k1)} T_{q2}^{(k2)}``.
+    r"""Return Bloch vector for the product ``T_{q1}^{(k1)} T_{q2}^{(k2)}``.
 
-    Implements the expansion
-    ``T_{q1}^{(k1)} T_{q2}^{(k2)} = \sum_{k3,q3} c_{k1 k2 k3}^{q1 q2 q3} T_{q3}^{(k3)}``.
+    Computes ``r = T_{q1}^{(k1)} * T_{q2}^{(k2)}`` in the operator sense.
+    Uses the precomputed structure constants.
 
     Parameters
     ----------
     kq1, kq2 : tuple(int, int)
-        Basis labels ``(k, q)``.
+        Indices ``(k, q)`` for the two basis operators.
 
     Returns
     -------
     GeneralizedBlochVector
-        Length ``d**2`` vector with nonzeros at allowed ``(k3,q3)``.
-
-    Notes
-    -----
-    - Identity: ``T_{00} = I/\sqrt{d}`` so products with ``T_{00}`` scale by ``1/\sqrt{d}``.
-    - Ordering: Reversed order applies phase ``(-1)^{k1+k2+k3}`` from 3j symmetry.
+        Bloch vector for the product operator.
     """
     _ensure_initialized()
     d = _bloch_dim   # type: ignore
@@ -687,11 +692,21 @@ def basis_product(kq1: Tuple[int, int], kq2: Tuple[int, int]) -> "GeneralizedBlo
     return GeneralizedBlochVector(sp_vec)
 
 def structure_const(kq1: Tuple[int, int], kq2: Tuple[int, int]) -> "GeneralizedBlochVector":
-    """Return Bloch vector of commutator coefficients.
+    r"""Return Bloch vector of commutator coefficients.
 
     Uses ``[A,B] = A B - B A`` with each product expanded by :func:`basis_product`.
     Provides entries ``f_{k1 k2 k3}^{q1 q2 q3}`` in
     ``[T_{q1}^{(k1)}, T_{q2}^{(k2)}] = \sum_{k3,q3} f_{k1 k2 k3}^{q1 q2 q3} T_{q3}^{(k3)}``.
+
+    Parameters
+    ----------
+    kq1, kq2 : tuple(int, int)
+        Indices ``(k, q)`` for the two basis operators.
+
+    Returns
+    -------
+    GeneralizedBlochVector
+        Coefficients of the commutator.
     """
     _ensure_initialized()
     return basis_product(kq1, kq2) - basis_product(kq2, kq1)
@@ -823,7 +838,7 @@ def bloch_tensor_product(u: GeneralizedBlochVector,
         ru = u_coo.data[mask]
     else:
         idx_r = np.flatnonzero(np.abs(u.data) > tol)
-        ru = u.data[idx_r]
+        ru = u.data.ravel()[idx_r]
 
     if issparse(v.data):
         v_coo = v.data.tocoo()
@@ -832,7 +847,7 @@ def bloch_tensor_product(u: GeneralizedBlochVector,
         sv = v_coo.data[mask]
     else:
         idx_s = np.flatnonzero(np.abs(v.data) > tol)
-        sv = v.data[idx_s]
+        sv = v.data.ravel()[idx_s]
 
     if idx_r.size == 0 or idx_s.size == 0:
         return GeneralizedBlochVector.zeros()

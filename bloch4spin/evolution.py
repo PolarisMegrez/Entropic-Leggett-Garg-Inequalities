@@ -38,7 +38,7 @@ from dataclasses import dataclass, field
 from typing import Any, Union
 from collections import OrderedDict
 import numpy as np
-from scipy.sparse import csr_matrix, isspmatrix_csr
+from scipy.sparse import issparse, csr_matrix, isspmatrix_csr
 from scipy.sparse.linalg import expm_multiply
 from scipy.linalg import expm as dense_expm
 from .basis import (
@@ -87,7 +87,16 @@ class GeneralizedBlochHamiltonian(GeneralizedBlochVector):
         super().__post_init__()
         # Hermiticity check
         s = bloch_hermitian_transpose(self)
-        if not np.allclose(self.data, s.data, rtol=1e-10, atol=1e-12):
+        
+        d1 = self.data
+        d2 = s.data
+        
+        if issparse(d1):
+            d1 = d1.toarray()
+        if issparse(d2):
+            d2 = d2.toarray()
+            
+        if not np.allclose(d1, d2, rtol=1e-10, atol=1e-12):
             raise ValueError("Hamiltonian must be Hermitian in operator space.")
 
     @staticmethod
@@ -254,6 +263,8 @@ class GeneralizedBlochEvolutionMatrix:
 
     def __add__(self, other):
         if isinstance(other, GeneralizedBlochEvolutionMatrix):
+            if self.data.shape != other.data.shape:
+                raise ValueError(f"Inconsistent shapes in addition: {self.data.shape} vs {other.data.shape}")
             return self._wrap_result(self.data + other.data)
         return NotImplemented
 
@@ -312,7 +323,7 @@ class GeneralizedBlochEvolutionMatrix:
 
     @staticmethod
     def from_Hamiltonian(Ham: Any) -> "GeneralizedBlochEvolutionMatrix":
-        """Construct the Liouvillian ``L`` for unitary evolution.
+        r"""Construct the Liouvillian ``L`` for unitary evolution.
 
         Accepts a Hamiltonian specified either as a Bloch-space object or as
         a matrix and guarantees Hermiticity by first instantiating a
@@ -359,24 +370,31 @@ class GeneralizedBlochEvolutionMatrix:
         else:
             raise TypeError("Ham must be ndarray, GeneralizedBlochVector, or GeneralizedBlochHamiltonian.")
 
-        d = H.data.size
-        mat = np.zeros((d, d), dtype=complex)
+        d_hilbert = bloch_dim()
+        D = d_hilbert * d_hilbert
+        mat = np.zeros((D, D), dtype=complex)
         # Map indices to (k,q)
-        kq = [_kq_from_idx(n) for n in range(d)]
+        kq = [_kq_from_idx(n) for n in range(D)]
         # Compute each matrix element via c-vector of [T_a, T_b]
-        for a in range(d):
+        for a in range(D):
             ka, qa = kq[a]
-            for b in range(d):
+            for b in range(D):
                 kb, qb = kq[b]
                 phase = (-1) ** qb
                 # c-vector of structure constants f_{ab}^c
                 c_vec = structure_const((ka, qa), (kb, -qb))
-                mat[a, b] = -1j * phase * bloch_inner_product(c_vec, H)
+                val = -1j * phase * bloch_inner_product(c_vec, H)
+                # Ensure scalar
+                if issparse(val):
+                    val = val.toarray().item()
+                elif isinstance(val, np.ndarray) and val.size == 1:
+                    val = val.item()
+                mat[a, b] = val
         return GeneralizedBlochEvolutionMatrix(csr_matrix(mat, dtype=np.complex128))
 
     @staticmethod
     def from_Lindblad(K: Any, *, atol: float = 1e-12) -> "GeneralizedBlochEvolutionMatrix":
-        """Construct the dissipative Liouvillian row-wise from a Lindblad operator.
+        r"""Construct the dissipative Liouvillian row-wise from a Lindblad operator.
 
         Builds the matrix ``L_K`` corresponding to the superoperator
         ``\mathcal{L}_K[\rho] = K\rho K^{\dagger} - \tfrac12\{K^{\dagger}K,\rho\}``.
@@ -433,7 +451,10 @@ class GeneralizedBlochEvolutionMatrix:
             left = rMM * rTa
             right = rTa * rMM
             k_a = jump_term - 0.5 * (left + right)
-            L[a, :] = np.conj(k_a.data)
+            if issparse(k_a.data):
+                L[a, :] = np.conj(k_a.data.toarray().flatten())
+            else:
+                L[a, :] = np.conj(k_a.data)
 
         return GeneralizedBlochEvolutionMatrix(csr_matrix(L))
 
@@ -467,11 +488,20 @@ class GeneralizedBlochState(GeneralizedBlochVector):
         super().__post_init__()
         # Hermiticity check
         s = bloch_hermitian_transpose(self)
-        if not np.allclose(self.data, s.data, rtol=1e-10, atol=1e-10):
+        
+        d1 = self.data
+        d2 = s.data
+        
+        if issparse(d1):
+            d1 = d1.toarray()
+        if issparse(d2):
+            d2 = d2.toarray()
+
+        if not np.allclose(d1, d2, rtol=1e-10, atol=1e-10):
             raise ValueError("Density Matrix must be Hermitian in operator space.")
 
     def normalization(self) -> Union[complex, np.ndarray]:
-        """Normalize the Bloch state so that ``Tr(ρ)=1``.
+        r"""Normalize the Bloch state so that ``Tr(ρ)=1``.
 
         Ensures the density operator trace equals unity by rescaling the Bloch
         vector with a complex factor determined from ``r_{00}``.

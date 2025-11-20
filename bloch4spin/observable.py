@@ -1,4 +1,4 @@
-"""
+r"""
 bloch4spin: Measurement Superoperators in Bloch Representation
 --------------------------------------------------------------
 Defines a compact wrapper for measurement-induced superoperators acting on
@@ -22,7 +22,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Union
 import numpy as np
-from scipy.sparse import csr_matrix, isspmatrix_csr
+from scipy.sparse import issparse, csr_matrix, isspmatrix_csr
 
 from .basis import (
     GeneralizedBlochVector,
@@ -70,7 +70,7 @@ class GeneralizedBlochObservable:
 
     @staticmethod
     def from_Kraus(K: Union[np.ndarray, GeneralizedBlochVector]) -> "GeneralizedBlochObservable":
-        """Construct the superoperator ``L_K`` for ``ρ -> K ρ K^\dagger``.
+        r"""Construct the superoperator ``L_K`` for ``ρ -> K ρ K^\dagger``.
 
         Parameters
         ----------
@@ -107,13 +107,16 @@ class GeneralizedBlochObservable:
             # k_a = Bloch(K^\dagger T_a K)
             k_a = rK_dag * rTa * rK
             # Row a is conj(k_a)
-            L[a, :] = np.conj(k_a.data)
+            if issparse(k_a.data):
+                L[a, :] = np.conj(k_a.data.toarray().flatten())
+            else:
+                L[a, :] = np.conj(k_a.data)
 
         return GeneralizedBlochObservable(csr_matrix(L))
 
     @staticmethod
     def from_POVM_elem(M: Union[np.ndarray, GeneralizedBlochVector], *, atol: float = 1e-12) -> "GeneralizedBlochObservable":
-        """Construct ``L`` from a single POVM element ``M = K^{\dagger}K``.
+        r"""Construct ``L`` from a single POVM element ``M = K^{\dagger}K``.
 
         Chooses the Kraus operator as the positive square root ``K = \sqrt{M}``.
 
@@ -155,7 +158,7 @@ class GeneralizedBlochObservable:
 
     @staticmethod
     def from_projector(P: Union[np.ndarray, GeneralizedBlochVector]) -> "GeneralizedBlochObservable":
-        """Rank-1 projector shortcut ``ρ -> P ρ P``.
+        r"""Rank-1 projector shortcut ``ρ -> P ρ P``.
 
         For a one-dimensional projector ``P = |ψ\rangle\langleψ|``, the post-measurement
         (unnormalized) state is ``ρ' = (\langleψ|ρ|ψ\rangle) P``. In Bloch coordinates
@@ -182,6 +185,8 @@ class GeneralizedBlochObservable:
         else:
             rP = GeneralizedBlochVector.from_matrix(np.asarray(P))
         v = rP.data
+        if issparse(v):
+            v = v.toarray().flatten()
         L = np.outer(v, np.conj(v))
         return GeneralizedBlochObservable(csr_matrix(L))
 
@@ -191,7 +196,7 @@ def apply_measurement(observables: list[GeneralizedBlochObservable],
                       norm_mode: str = "normalized",
                       clip_negative: bool = True,
                       atol: float = 1e-12):
-    """Apply a list of measurement superoperators to a Bloch state.
+    r"""Apply a list of measurement superoperators to a Bloch state.
 
     Each ``GeneralizedBlochObservable`` represents a single outcome's
     (unnormalized) update ``r' = L r``. This function returns the outcome
@@ -256,12 +261,23 @@ def apply_measurement(observables: list[GeneralizedBlochObservable],
         r_prime = obs.data @ r_in  # unnormalized Bloch vector(s)
         
         # Extract probability: sqrt(d) * r_prime[0]
+        # r_prime is (d^2, N)
+        r00s = r_prime[0, :]
+        if issparse(r00s):
+            r00s = r00s.toarray().flatten()
+        
         if r_prime.ndim == 1:
-            p = (sqrt_d * r_prime[0]).real
+            p = (sqrt_d * r00s).real
             if clip_negative and p < 0 and p > -atol:
                 p = 0.0
         else:
-            p = (sqrt_d * r_prime[0, :]).real
+            p = (sqrt_d * r00s).real
+            # Ensure p is 1D array
+            if isinstance(p, np.matrix):
+                p = np.asarray(p).flatten()
+            elif p.ndim > 1:
+                p = p.flatten()
+                
             if clip_negative:
                 p[ (p < 0) & (p > -atol) ] = 0.0
         
