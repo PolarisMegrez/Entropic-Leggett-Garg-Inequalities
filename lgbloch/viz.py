@@ -35,20 +35,10 @@ def _set_default_rcparams() -> None:
     plt.rcParams['mathtext.rm'] = 'sans'
     plt.rcParams['mathtext.it'] = 'sans:italic'
     plt.rcParams['mathtext.bf'] = 'sans:bold'
+    plt.rcParams['axes.labelsize'] = 18
+    plt.rcParams['xtick.labelsize'] = 15
+    plt.rcParams['ytick.labelsize'] = 15
 
-def _style_axes(ax: plt.Axes, *, x_label: Optional[str] = None, y_label: Optional[str] = None, title: Optional[str] = None) -> None:
-    """Apply consistent axis labels, ticks, and optional title.
-
-    - x_label/y_label default to 'x'/'y' when not provided
-    - tick label size set to 15; axis label size set to 18
-    - title is only set when provided (default: no title)
-    """
-    ax.set_xlabel(x_label if x_label is not None else 'x', fontsize=18)
-    ax.set_ylabel(y_label if y_label is not None else 'y', fontsize=18)
-    ax.tick_params(axis='x', labelsize=15)
-    ax.tick_params(axis='y', labelsize=15)
-    if title:
-        ax.set_title(title)
 
 def _auto_n_jobs() -> int:
     """Pick a conservative default thread count without extra deps.
@@ -220,11 +210,10 @@ def plot_boolean_region(
     label: Optional[Union[str, Sequence[str]]] = None,
     color: Optional[Union[str, Sequence[str]]] = None,
     alpha: Union[float, Sequence[float]] = 0.4,
+    linestyle: Optional[Union[str, Sequence[str]]] = None,
+    linewidth: Union[float, Sequence[float]] = 1.5,
     mode: str = "overlay",
     ax: Optional[plt.Axes] = None,
-    x_label: Optional[str] = None,
-    y_label: Optional[str] = None,
-    title: Optional[str] = None,
     save_data: Union[bool, str] = False,
 ):
     """Plot boolean region(s) for a single- or multi-output function.
@@ -247,17 +236,15 @@ def plot_boolean_region(
         Color(s) for the region(s).
     alpha : float | Sequence[float], optional
         Transparency level(s). Default is 0.4.
+    linestyle : str | Sequence[str], optional
+        Line style(s) for the region boundary. Defaults to ``None`` (no boundary).
+    linewidth : float | Sequence[float], optional
+        Line width(s) for the region boundary. Default is 1.5.
     mode : {'overlay', 'separate', 'both'}, optional
         Plotting mode. 'overlay' draws all on one axes. 'separate' draws K figures.
         'both' does both. Default is 'overlay'.
     ax : matplotlib.axes.Axes, optional
         Target axes for overlay mode. If None, a new figure is created.
-    x_label : str, optional
-        Label for x-axis.
-    y_label : str, optional
-        Label for y-axis.
-    title : str, optional
-        Title for the plot(s).
     save_data : bool | str, optional
         If True, saves (X, Y, masks) to "{func.__name__}.npz".
         If a string, saves to that path. Default is False.
@@ -307,13 +294,17 @@ def plot_boolean_region(
     labels = to_list(label, None, K)
     colors = to_list(color, None, K)
     alphas = to_list(alpha, 0.4, K)
+    linestyles = to_list(linestyle, None, K)
+    linewidths = to_list(linewidth, 1.5, K)
 
-    def draw_one(ax_obj, mk, lab, col, alp):
+    def draw_one(ax_obj, mk, lab, col, alp, lst, lwd):
         # Pick color
         if col is None:
             col = next(ax_obj._get_lines.prop_cycler)['color']
         rgba = to_rgba(col)
         cmap = ListedColormap([(0, 0, 0, 0), (rgba[0], rgba[1], rgba[2], 1.0)])
+        
+        # Filled region
         ax_obj.imshow(mk.astype(float),
                       origin='lower',
                       extent=(x_range[0], x_range[1], y_range[0], y_range[1]),
@@ -321,9 +312,36 @@ def plot_boolean_region(
                       interpolation='nearest',
                       cmap=cmap,
                       alpha=float(alp))
+        
+        # Boundary contour if linestyle is provided
+        if lst is not None:
+            # We need to be careful with extent. imshow uses pixel centers/edges logic.
+            # contour uses grid coordinates.
+            # X_grid and Y_grid correspond to the points where func was evaluated.
+            # If n=100, we have 100x100 points.
+            # imshow extent covers the range.
+            
+            # Use the actual grid for contour
+            ax_obj.contour(X_grid, Y_grid, mk.astype(float), 
+                           levels=[0.5], 
+                           colors=[col], 
+                           linestyles=[lst],
+                           linewidths=[lwd])
+
         if lab:
             from matplotlib.patches import Patch
+            from matplotlib.lines import Line2D
+            
+            # If we have a linestyle, the legend should probably reflect that, 
+            # but a Patch is standard for regions. 
+            # If we only have a boundary (alpha=0), we might want a Line2D.
+            # For now, we stick to Patch if alpha > 0, else Line2D?
+            # The user default alpha is 0.4, so usually it's a patch.
+            
             proxy = Patch(facecolor=col, alpha=float(alp), label=lab)
+            # If it's just a line (alpha=0), maybe use Line2D? 
+            # But let's keep it simple and consistent with previous behavior for now.
+            
             existing = ax_obj.get_legend()
             if existing is not None:
                 # Matplotlib 3.7+ uses legend_handles; older versions used legendHandles
@@ -332,8 +350,6 @@ def plot_boolean_region(
             else:
                 old_handles, old_labels = [], []
             ax_obj.legend(old_handles + [proxy], old_labels + [lab], loc='upper right', fontsize=15, labelspacing=0.35)
-        # axis labels/ticks/title (title only when provided)
-        _style_axes(ax_obj, x_label=x_label, y_label=y_label, title=None)
 
     mode = str(mode).lower()
     if mode not in ("overlay", "separate", "both"):
@@ -349,11 +365,9 @@ def plot_boolean_region(
             ax_overlay = ax
             fig_overlay = ax_overlay.figure
         for k in range(K):
-            draw_one(ax_overlay, masks[k], labels[k], colors[k], alphas[k])
+            draw_one(ax_overlay, masks[k], labels[k], colors[k], alphas[k], linestyles[k], linewidths[k])
         ax_overlay.set_xlim(x_range)
         ax_overlay.set_ylim(y_range)
-        # Optional title only if provided
-        _style_axes(ax_overlay, x_label=x_label, y_label=y_label, title=title)
         if mode == "overlay":
             return fig_overlay, ax_overlay
         results = (fig_overlay, ax_overlay)
@@ -364,19 +378,15 @@ def plot_boolean_region(
         ax_list: List[plt.Axes] = []
         for k in range(K):
             fig_k, ax_k = plt.subplots(figsize=(5, 4))
-            draw_one(ax_k, masks[k], labels[k], colors[k], alphas[k])
+            draw_one(ax_k, masks[k], labels[k], colors[k], alphas[k], linestyles[k], linewidths[k])
             ax_k.set_xlim(x_range)
             ax_k.set_ylim(y_range)
-            # Optional per-axes title only if provided; otherwise none
-            per_title = title if title is not None else None
-            _style_axes(ax_k, x_label=x_label, y_label=y_label, title=per_title)
             fig_list.append(fig_k)
             ax_list.append(ax_k)
         if mode == "separate":
             return list(zip(fig_list, ax_list))
         else:
             return results + (list(zip(fig_list, ax_list)),)  # type: ignore
-
 
 def plot_multioutput_curves(
     func: Callable[[float], Union[float, Sequence[float]]],
@@ -386,10 +396,8 @@ def plot_multioutput_curves(
     label: Optional[Union[str, Sequence[str]]] = None,
     color: Optional[Union[str, Sequence[str]]] = None,
     linewidth: Union[float, Sequence[float]] = 1.5,
+    linestyle: Optional[Union[str, Sequence[str]]] = None,
     ax: Optional[plt.Axes] = None,
-    x_label: Optional[str] = None,
-    y_label: Optional[str] = None,
-    title: Optional[str] = None,
 ):
     """Plot multiple y(x) curves returned by a single-input function on one axes.
 
@@ -401,21 +409,17 @@ def plot_multioutput_curves(
     x_values : np.ndarray
         1D array of x values at which to evaluate ``func``.
     n_jobs : int, optional
-        Number of threads for parallel execution. If None, chosen automatically.
+        Ignored. Parallel execution is disabled for this function.
     label : str | Sequence[str], optional
         Label(s) for the curve(s); if multi-output, supply a list of length K.
     color : str | Sequence[str], optional
         Color(s) for the curve(s); if multi-output, supply a list of length K.
     linewidth : float | Sequence[float], optional
         Line width(s) for the curve(s). Defaults to ``1.5``.
+    linestyle : str | Sequence[str], optional
+        Line style(s) for the curve(s). Defaults to ``'-'``.
     ax : matplotlib.axes.Axes, optional
         Target axes. If not provided, a new figure and axes are created.
-    x_label : str, optional
-        Label for x-axis.
-    y_label : str, optional
-        Label for y-axis.
-    title : str, optional
-        Title for the plot.
 
     Returns
     -------
@@ -429,8 +433,6 @@ def plot_multioutput_curves(
     # Probe first point to determine arity
     first = func(float(x_values[0]))
 
-    nj = _resolve_n_jobs(n_jobs)
-
     def _get_xs():
         return [float(x) for x in x_values[1:]]
 
@@ -442,21 +444,7 @@ def plot_multioutput_curves(
             Y[k, 0] = float(outs0[k])
         if x_values.size > 1:
             xs = _get_xs()
-            if int(nj) and nj > 1:
-                n_workers = int(nj)
-                n_chunks = n_workers * 4
-                chunk_size = max(1, len(xs) // n_chunks)
-                chunks = [xs[i:i + chunk_size] for i in range(0, len(xs), chunk_size)]
-                print(f"Parallel execution: {len(chunks)} chunks (target {n_chunks}) on {n_workers} workers.")
-
-                def _process_chunk(chunk):
-                    return [func(x) for x in chunk]
-
-                with ThreadPoolExecutor(max_workers=n_workers) as ex:
-                    chunk_results = list(ex.map(_process_chunk, chunks))
-                results = [item for sublist in chunk_results for item in sublist]
-            else:
-                results = [func(x) for x in xs]
+            results = [func(x) for x in xs]
             for i, vals in enumerate(results, start=1):
                 for k in range(K):
                     Y[k, i] = float(vals[k])
@@ -466,21 +454,7 @@ def plot_multioutput_curves(
         Y[0, 0] = float(first)
         if x_values.size > 1:
             xs = _get_xs()
-            if int(nj) and nj > 1:
-                n_workers = int(nj)
-                n_chunks = n_workers * 4
-                chunk_size = max(1, len(xs) // n_chunks)
-                chunks = [xs[i:i + chunk_size] for i in range(0, len(xs), chunk_size)]
-                print(f"Parallel execution: {len(chunks)} chunks (target {n_chunks}) on {n_workers} workers.")
-
-                def _process_chunk(chunk):
-                    return [func(x) for x in chunk]
-
-                with ThreadPoolExecutor(max_workers=n_workers) as ex:
-                    chunk_results = list(ex.map(_process_chunk, chunks))
-                results = [item for sublist in chunk_results for item in sublist]
-            else:
-                results = [func(x) for x in xs]
+            results = [func(x) for x in xs]
             for i, val in enumerate(results, start=1):
                 Y[0, i] = float(val)
 
@@ -495,6 +469,7 @@ def plot_multioutput_curves(
     labels = to_list(label, None, K)
     colors = to_list(color, None, K)
     lws    = to_list(linewidth, 1.5, K)
+    lss    = to_list(linestyle, '-', K)
 
     # Apply global style
     _set_default_rcparams()
@@ -514,10 +489,9 @@ def plot_multioutput_curves(
                 col = ax._get_lines.get_next_color()
             except Exception:
                 col = None
-        ax.plot(x_values, Y[k], label=labels[k], color=col, linewidth=float(lws[k]))
+        ax.plot(x_values, Y[k], label=labels[k], color=col, linewidth=float(lws[k]), linestyle=lss[k])
 
     if any(lab is not None for lab in labels):
         ax.legend(loc='upper right', fontsize=15, labelspacing=0.35)
-    _style_axes(ax, x_label=x_label, y_label=y_label, title=title)
     ax.grid(True, alpha=0.2)
     return fig, ax

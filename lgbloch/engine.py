@@ -51,21 +51,24 @@ def spin_ops(d: int):
     Jy = (Jp - Jm) / (2.0j)
     return Jx, Jy, Jz, Jp, Jm
 
-def projectors_Jz(d: int):
+def projectors_Jz(d: int, indices: Tuple[int, ...] | None = None):
     """Construct projectors onto Jz eigenstates for dimension d.
 
     Parameters
     ----------
     d : int
         Hilbert space dimension.
+    indices : tuple[int, ...], optional
+        Indices of the eigenstates to project onto. If None, returns all d projectors.
 
     Returns
     -------
     list
-        List of d projectors (as numpy arrays), ordered by eigenvalue.
+        List of projectors (as numpy arrays), ordered by eigenvalue.
     """
     Ps = []
-    for i in range(d):
+    rng = indices if indices is not None else range(d)
+    for i in rng:
         P = np.zeros((d, d), dtype=complex)
         P[i, i] = 1.0
         Ps.append(P)
@@ -109,7 +112,7 @@ def run_case(
     # Ensure Bloch basis dimension matches requested d before running
     bloch_init(d)
     schedule = [(float(t), obs_list) for t in times]
-    return run(L_mat, r0, schedule, norm_mode="normalized")
+    return run(L_mat, r0, schedule, norm_mode="renormalized")
 
 # ---- Probability distributions helpers ----
 
@@ -192,7 +195,7 @@ def distributions_from_times(
         sub_times = [times[i - 1] for i in S]
         jp = run_case(d, sub_times, L_mat, r0, obs_list)
         dist[S] = jp
-    return JointProbabilitySet(dist, d, M)
+    return JointProbabilitySet(dist, len(obs_list), M)
 
 def distributions_from_deltas(
     deltas: List[float],
