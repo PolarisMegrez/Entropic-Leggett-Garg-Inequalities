@@ -93,9 +93,28 @@ def boolean_grid(func: Callable[[float, float], Union[bool, Sequence[bool]]],
                   n_jobs: Optional[int] = None):
     """Evaluate a boolean function (single or multi-output) on an (x,y) grid.
 
-    If func returns a single bool, returns (X, Y, mask) with mask shape (n,n).
-    If func returns a sequence of bools of length K, returns (X, Y, masks)
-    with masks shape (K, n, n), where masks[k] corresponds to the k-th output.
+    Parameters
+    ----------
+    func : Callable[[float, float], bool | Sequence[bool]]
+        Function to evaluate. Can return a single bool or a sequence of bools.
+    x_range : tuple of float
+        (min, max) for the x-axis.
+    y_range : tuple of float
+        (min, max) for the y-axis.
+    n : int, optional
+        Number of grid points along each axis. Default is 100.
+    n_jobs : int, optional
+        Number of threads for parallel execution. If None, chosen automatically.
+
+    Returns
+    -------
+    X_grid : ndarray
+        Meshgrid X coordinates (n, n).
+    Y_grid : ndarray
+        Meshgrid Y coordinates (n, n).
+    masks : ndarray
+        Boolean mask(s). If func returns single bool, shape is (n, n).
+        If func returns K bools, shape is (K, n, n).
     """
     x_min, x_max = map(float, x_range)
     y_min, y_max = map(float, y_range)
@@ -206,22 +225,71 @@ def plot_boolean_region(
     x_label: Optional[str] = None,
     y_label: Optional[str] = None,
     title: Optional[str] = None,
+    save_data: Union[bool, str] = False,
 ):
     """Plot boolean region(s) for a single- or multi-output function.
 
-    - func(x,y) -> bool or Sequence[bool]; if multiple, length K.
-    - mode: "overlay" (default) draws all K on one axes; "separate" draws K figures;
-      "both" draws overlay then separate. Returns:
-        * overlay: (fig, ax)
-        * separate: list[(fig, ax)]
-        * both: (fig_overlay, ax_overlay, list[(fig, ax)])
-    - label/color/alpha accept a single value or a list of length K.
-    - ax: used only for overlay mode.
+    Parameters
+    ----------
+    func : Callable[[float, float], bool | Sequence[bool]]
+        Function to evaluate. Can return a single bool or a sequence of bools.
+    x_range : tuple of float
+        (min, max) for the x-axis.
+    y_range : tuple of float
+        (min, max) for the y-axis.
+    n : int, optional
+        Number of grid points along each axis. Default is 100.
+    n_jobs : int, optional
+        Number of threads for parallel execution. If None, chosen automatically.
+    label : str | Sequence[str], optional
+        Label(s) for the region(s).
+    color : str | Sequence[str], optional
+        Color(s) for the region(s).
+    alpha : float | Sequence[float], optional
+        Transparency level(s). Default is 0.4.
+    mode : {'overlay', 'separate', 'both'}, optional
+        Plotting mode. 'overlay' draws all on one axes. 'separate' draws K figures.
+        'both' does both. Default is 'overlay'.
+    ax : matplotlib.axes.Axes, optional
+        Target axes for overlay mode. If None, a new figure is created.
+    x_label : str, optional
+        Label for x-axis.
+    y_label : str, optional
+        Label for y-axis.
+    title : str, optional
+        Title for the plot(s).
+    save_data : bool | str, optional
+        If True, saves (X, Y, masks) to "{func.__name__}.npz".
+        If a string, saves to that path. Default is False.
+
+    Returns
+    -------
+    result : tuple or list
+        - 'overlay': (fig, ax)
+        - 'separate': list of (fig, ax)
+        - 'both': (fig_overlay, ax_overlay, list of (fig, ax))
     """
     # Matplotlib style per project convention
     _set_default_rcparams()
 
     X_grid, Y_grid, masks = boolean_grid(func, x_range, y_range, n=n, n_jobs=n_jobs)
+
+    if save_data:
+        if isinstance(save_data, str):
+            out_path = save_data
+        else:
+            out_path = getattr(func, "__name__", "boolean_region_data")
+        
+        if not out_path.endswith(".npz"):
+            out_path += ".npz"
+            
+        # Ensure directory exists
+        out_dir = os.path.dirname(out_path)
+        if out_dir:
+            os.makedirs(out_dir, exist_ok=True)
+
+        np.savez_compressed(out_path, X=X_grid, Y=Y_grid, masks=masks)
+        print(f"Boolean region data saved to: {os.path.abspath(out_path)}")
 
     # Normalize to multi-output representation
     if masks.ndim == 2:
@@ -331,6 +399,8 @@ def plot_multioutput_curves(
         sequence of floats (multi-output). If single-output, one curve is drawn.
     x_values : np.ndarray
         1D array of x values at which to evaluate ``func``.
+    n_jobs : int, optional
+        Number of threads for parallel execution. If None, chosen automatically.
     label : str | Sequence[str], optional
         Label(s) for the curve(s); if multi-output, supply a list of length K.
     color : str | Sequence[str], optional
@@ -339,6 +409,12 @@ def plot_multioutput_curves(
         Line width(s) for the curve(s). Defaults to ``1.5``.
     ax : matplotlib.axes.Axes, optional
         Target axes. If not provided, a new figure and axes are created.
+    x_label : str, optional
+        Label for x-axis.
+    y_label : str, optional
+        Label for y-axis.
+    title : str, optional
+        Title for the plot.
 
     Returns
     -------

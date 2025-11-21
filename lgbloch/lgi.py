@@ -8,10 +8,12 @@ maintainability; no optional JIT/parallel paths are used.
 """
 
 from typing import Tuple
+from itertools import combinations
 import numpy as np
 from .engine import JointProbabilitySet
 
 __all__ = [
+    "entropic_LGI",
     "entropic_LGI_three_point",
     "entropic_LGI_four_point",
     "standard_LGI_dichotomic_three_point",
@@ -36,188 +38,52 @@ def _jz_values_for_d(d: int) -> np.ndarray:
     j = (d - 1) / 2.0
     return j - np.arange(d, dtype=float)
 
-def entropic_LGI_three_point(jps: JointProbabilitySet) -> float:
-    """Three-point entropic LGI test.
+def entropic_LGI(n: int, jps: JointProbabilitySet) -> float:
+    r"""General entropic LGI test for n time points using Shannon cone basis elements.
+
+    Iterates over all subsets of measurement points and computes elementary inequalities:
+    1. Conditional Entropy: H(S) - H(S \ {i}) >= 0
+    2. Conditional Mutual Information: H(S \ {i}) + H(S \ {j}) - H(S) - H(S \ {i, j}) >= 0
 
     Parameters
     ----------
+    n : int
+        Number of time points.
     jps : JointProbabilitySet
-        Joint probability tensors for all non-empty subsets of three time points.
-        Outcome count is unconstrained; only the number of time points must be 3.
-    atol : float, optional
-        Numerical tolerance. An inequality is considered satisfied if its value is
-        greater than or equal to ``-atol``. Default is ``1e-10``.
+        Joint probability tensors.
 
     Returns
     -------
     float
-        The minimum value among the checked entropic combinations. Values ≥ 0
-        indicate satisfaction (use ``atol`` outside to set a tolerance threshold).
-
-    Notes
-    -----
-    - Invasive semantics: each subset distribution is computed independently (no marginalization).
-    - The following linear combinations of Shannon entropies are checked (all must be ≥ 0 up to ``atol``):
-
-    References
-    ----------
-    - Q.-H. Cai, X.-H. Yu, et al., "Conditions for Quantum Violation of Macrorealism in Large-Spin Limit," arXiv:2505.13162 (2025).
+        Minimum value of the inequalities.
     """
-    # Entropic test does not constrain outcome_num; require 3 time points
-    jps.validate(expected_time_points=3)
+    jps.validate(expected_time_points=n)
     dist = jps.distributions
-    # 1-point entropies
-    h1   = _shannon_entropy_bits(dist[(1,)])
-    h2   = _shannon_entropy_bits(dist[(2,)])
-    h3   = _shannon_entropy_bits(dist[(3,)])
-    # 2-point entropies
-    h12  = _shannon_entropy_bits(dist[(1, 2)])
-    h23  = _shannon_entropy_bits(dist[(2, 3)])
-    h13  = _shannon_entropy_bits(dist[(1, 3)])
-    # 3-point entropies
-    h123 = _shannon_entropy_bits(dist[(1, 2, 3)])
-    
-    combos = []
-    # order-3 type
-    combos.extend([
-        h123 - h23,
-        h123 - h13,
-        h13 + h23 - h123 - h3,
-        h12 + h13 - h123 - h1,
-        h12 + h23 - h123 - h2
-    ])
-    # order-2 type
-    combos.extend([
-        h12 - h2, h1 + h2 - h12,
-        h23 - h3, h2 + h3 - h23,
-        h13 - h3, h1 + h3 - h13,
-        h23 + h12 - h2 - h13,
-        h13 + h23 - h3 - h12,
-        h13 + h12 - h1 - h23,
-    ])
-    return float(np.min(combos))
 
-def entropic_LGI_four_point(jps: JointProbabilitySet) -> float:
-    """Four-point entropic LGI test.
+    def H(subset):
+        if not subset:
+            return 0.0
+        return _shannon_entropy_bits(dist[tuple(sorted(subset))])
 
-    Parameters
-    ----------
-    jps : JointProbabilitySet
-        Joint probability tensors for all non-empty subsets of four time points.
-        Outcome count is unconstrained; only the number of time points must be 4.
-    atol : float, optional
-        Numerical tolerance. An inequality is considered satisfied if its value is
-        greater than or equal to ``-atol``. Default is ``1e-10``.
+    values = []
+    # Iterate over all subset sizes k from 2 to n
+    for k in range(2, n + 1):
+        for subset in combinations(range(1, n + 1), k):
+            subset_set = set(subset)
 
-    Returns
-    -------
-    float
-        The minimum value among the checked entropic combinations. Values ≥ 0
-        indicate satisfaction (use ``atol`` outside to set a tolerance threshold).
+            # Type 1: D_i = H(S) - H(S \ {i})
+            for i in subset_set:
+                val = H(subset_set) - H(subset_set - {i})
+                values.append(val)
 
-    Notes
-    -----
-    - Invasive semantics: each subset distribution is computed independently (no marginalization).
-    - Checks the union of linear combinations across categories (order-2, pseudo-order-3, order-3,
-      pseudo-order-4, order-4); all must be ≥ 0 up to ``atol``.
+            # Type 2: D_{i,j} (only for k >= 3)
+            if k >= 3:
+                for i, j in combinations(subset_set, 2):
+                    val = H(subset_set - {i}) + H(subset_set - {j}) - H(subset_set) - H(subset_set - {i, j})
+                    values.append(val)
 
-    References
-    ----------
-    - Q.-H. Cai, X.-H. Yu, et al., "Conditions for Quantum Violation of Macrorealism in Large-Spin Limit," arXiv:2505.13162 (2025).
-    """
-    jps.validate(expected_time_points=4)
-    dist = jps.distributions
-    # 1-point entropies
-    h1 = _shannon_entropy_bits(dist[(1,)])
-    h2 = _shannon_entropy_bits(dist[(2,)])
-    h3 = _shannon_entropy_bits(dist[(3,)])
-    h4 = _shannon_entropy_bits(dist[(4,)])
-    # 2-point entropies
-    h12 = _shannon_entropy_bits(dist[(1, 2)])
-    h13 = _shannon_entropy_bits(dist[(1, 3)])
-    h14 = _shannon_entropy_bits(dist[(1, 4)])
-    h23 = _shannon_entropy_bits(dist[(2, 3)])
-    h24 = _shannon_entropy_bits(dist[(2, 4)])
-    h34 = _shannon_entropy_bits(dist[(3, 4)])
-    # 3-point entropies
-    h123 = _shannon_entropy_bits(dist[(1, 2, 3)])
-    h124 = _shannon_entropy_bits(dist[(1, 2, 4)])
-    h134 = _shannon_entropy_bits(dist[(1, 3, 4)])
-    h234 = _shannon_entropy_bits(dist[(2, 3, 4)])
-    # 4-point entropy
-    h1234 = _shannon_entropy_bits(dist[(1, 2, 3, 4)])
+    return float(np.min(values)) if values else 0.0
 
-    combos = []
-    # order-2 type
-    combos.extend([
-        h12 - h2, h1 + h2 - h12,
-        h13 - h3, h1 + h3 - h13,
-        h14 - h4, h1 + h4 - h14,
-        h23 - h3, h2 + h3 - h23,
-        h24 - h4, h2 + h4 - h24,
-        h34 - h4, h3 + h4 - h34,
-    ])
-    # pseudo order-3 type
-    combos.extend([
-        h23 + h12 - h2 - h13,
-        h13 + h23 - h3 - h12,
-        h13 + h12 - h1 - h23,
-        h24 + h12 - h2 - h14,
-        h14 + h24 - h4 - h12,
-        h14 + h12 - h1 - h24,
-        h34 + h13 - h3 - h14,
-        h14 + h34 - h4 - h13,
-        h14 + h13 - h1 - h34,
-        h34 + h23 - h3 - h24,
-        h24 + h34 - h4 - h23,
-        h24 + h23 - h2 - h34,
-    ])
-    # order-3 type
-    combos.extend([
-        h123 - h23, h123 - h13,
-        h124 - h12, h124 - h14,
-        h134 - h13, h134 - h34,
-        h234 - h23, h234 - h24,
-        h13 + h23 - h123 - h3,
-        h12 + h13 - h123 - h1,
-        h12 + h23 - h123 - h2,
-        h14 + h12 - h124 - h1,
-        h14 + h24 - h124 - h4,
-        h14 + h12 - h124 - h2,
-        h13 + h34 - h134 - h3,
-        h14 + h34 - h134 - h4,
-        h14 + h13 - h134 - h1,
-        h23 + h34 - h234 - h3,
-        h24 + h34 - h234 - h4,
-        h24 + h23 - h234 - h2,
-    ])
-    # pseudo order-4 type
-    combos.extend([
-        h134 + h234 - h123 - h34,
-        h124 + h134 - h123 - h14,
-        h124 + h234 - h123 - h24,
-        h134 + h123 - h124 - h13,
-        h134 + h234 - h124 - h34,
-        h134 + h123 - h124 - h23,
-        h123 + h234 - h134 - h23,
-        h124 + h234 - h134 - h24,
-        h124 + h123 - h134 - h12,
-        h123 + h134 - h234 - h13,
-        h124 + h134 - h234 - h14,
-        h124 + h123 - h234 - h12,
-    ])
-    # order-4 type
-    combos.extend([
-        h1234 - h124, h1234 - h134, h1234 - h234,
-        h123 + h124 - h12 - h1234,
-        h134 + h123 - h13 - h1234,
-        h134 + h124 - h14 - h1234,
-        h234 + h123 - h23 - h1234,
-        h124 + h234 - h24 - h1234,
-        h134 + h234 - h34 - h1234,
-    ])
-    return float(np.min(combos))
-    
 
 def standard_LGI_dichotomic_three_point(jps: JointProbabilitySet) -> float:
     """Three-point standard LGI positivity test (dichotomic outcomes).

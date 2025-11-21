@@ -37,6 +37,7 @@ Public API
 from dataclasses import dataclass, field
 from typing import Any, Union
 from collections import OrderedDict
+from threading import Lock
 import numpy as np
 from scipy.sparse import issparse, csr_matrix, isspmatrix_csr
 from scipy.sparse.linalg import expm_multiply
@@ -191,6 +192,7 @@ class GeneralizedBlochEvolutionMatrix:
     _expm_cache: "OrderedDict[float, np.ndarray]" = field(default_factory=OrderedDict, init=False, repr=False)
     _expm_cache_maxsize: int = field(default=512, init=False, repr=False)
     _expm_cache_round: int = field(default=12, init=False, repr=False)
+    _cache_lock: Lock = field(default_factory=Lock, init=False, repr=False)
     __array_priority__ = 1000
 
     def __post_init__(self) -> None:
@@ -214,14 +216,19 @@ class GeneralizedBlochEvolutionMatrix:
     def _dense_expm_cached(self, t: float) -> np.ndarray:
         key = round(float(t), self._expm_cache_round)
         cache = self._expm_cache
-        if key in cache:
-            cache.move_to_end(key)
-            return cache[key]
+        
+        with self._cache_lock:
+            if key in cache:
+                cache.move_to_end(key)
+                return cache[key]
+        
         Ld = self._get_dense()
         mat = dense_expm(Ld * key)
-        cache[key] = mat
-        if len(cache) > self._expm_cache_maxsize:
-            cache.popitem(last=False)
+        
+        with self._cache_lock:
+            cache[key] = mat
+            if len(cache) > self._expm_cache_maxsize:
+                cache.popitem(last=False)
         return mat
 
     # NumPy interop

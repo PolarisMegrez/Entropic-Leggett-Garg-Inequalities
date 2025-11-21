@@ -15,6 +15,18 @@ __all__ = [
 ]
 
 def spin_ops(d: int):
+    """Construct spin operators Jx, Jy, Jz, Jp, Jm for dimension d.
+
+    Parameters
+    ----------
+    d : int
+        Hilbert space dimension (d = 2j + 1).
+
+    Returns
+    -------
+    tuple
+        (Jx, Jy, Jz, Jp, Jm) as GeneralizedBlochVector objects.
+    """
     bloch_init(d)
     j = (d - 1) / 2.0
     c = np.sqrt((j*(j+1)*(2*j+1))/3)
@@ -40,6 +52,18 @@ def spin_ops(d: int):
     return Jx, Jy, Jz, Jp, Jm
 
 def projectors_Jz(d: int):
+    """Construct projectors onto Jz eigenstates for dimension d.
+
+    Parameters
+    ----------
+    d : int
+        Hilbert space dimension.
+
+    Returns
+    -------
+    list
+        List of d projectors (as numpy arrays), ordered by eigenvalue.
+    """
     Ps = []
     for i in range(d):
         P = np.zeros((d, d), dtype=complex)

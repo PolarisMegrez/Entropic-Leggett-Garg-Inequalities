@@ -7,8 +7,7 @@ from .engine import (
 )
 from .viz import boolean_grid, plot_boolean_region, plot_multioutput_curves
 from .lgi import (
-    entropic_LGI_three_point,
-    entropic_LGI_four_point,
+    entropic_LGI,
     standard_LGI_dichotomic_three_point,
     standard_LGI_dichotomic_four_point,
 )
@@ -25,8 +24,7 @@ __all__ = [
     "plot_boolean_region",
     "plot_multioutput_curves",
     # lgi boolean tests
-    "entropic_LGI_three_point",
-    "entropic_LGI_four_point",
+    "entropic_LGI",
     "standard_LGI_dichotomic_three_point",
     "standard_LGI_dichotomic_four_point",
 ]
