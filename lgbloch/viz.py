@@ -326,7 +326,8 @@ def plot_boolean_region(
             proxy = Patch(facecolor=col, alpha=float(alp), label=lab)
             existing = ax_obj.get_legend()
             if existing is not None:
-                old_handles = list(existing.legendHandles)
+                # Matplotlib 3.7+ uses legend_handles; older versions used legendHandles
+                old_handles = list(getattr(existing, "legend_handles", getattr(existing, "legendHandles", [])))
                 old_labels = [t.get_text() for t in existing.texts]
             else:
                 old_handles, old_labels = [], []
