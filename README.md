@@ -1,72 +1,38 @@
-# Leggett-Garg Inequalities Numerical Toolkit
+# Leggett-Garg Inequalities Numerical Toolkit 
 
-This repository contains the code used in the manuscript **“Conditions for Quantum Violation of Macrorealism in Large-spin Limit” (arXiv:2505.13162 [quant-ph])**. It provides a reproducible environment to generate multi‑time spin‑j measurement statistics and to evaluate Leggett–Garg–type inequalities (entropic, standard, and Wigner form).
+This code package provides the numerical tools used in the paper:
 
-**Authors: Yu Xue-Hao and Qiao Cong-Feng (University of Chinese Academy of Sciences, UCAS)**
+**“Conditions for Quantum Violation of Macrorealism in Large-spin Limit” (arXiv:2505.13162 [quant-ph])**
 
-- Exact joint probability construction.
-- Unified evaluation of ELGI, SLGI, and WLGI.
-- High‑resolution violation region and minimum‑value plotting utilities.
-- Spin‑j generalized Bloch evolution (Hamiltonian + Lindblad) via vendored `bloch4spin`.
-- Symmetry‑reduced Wigner 3j/6j caching for performance and memory efficiency.
+## Overview
 
-## Installation
+- Computes multi-time joint probability distributions for spin-j quantum systems.
+- Evaluates entropic, standard, and Wigner-type Leggett-Garg inequalities (LGIs).
+- Includes ready-to-use plotting functions for violation regions and minimum-value curves.
 
-Requirements:
-- Python >= 3.10
-- numpy >= 1.24, scipy >= 1.11, sympy >= 1.10, matplotlib >= 3.7, jupyter
+## Quick Start
 
-Clone and install (editable for development):
-```powershell
-git clone https://github.com/PolarisMegrez/Entropic-Leggett-Garg-Inequalities.git
-cd Entropic-Leggett-Garg-Inequalities
-pip install -e .
-```
+1. **Requirements:**
+   - Python >= 3.10
+   - numpy >= 1.24, scipy >= 1.11, sympy >= 1.10, matplotlib >= 3.7, jupyter
 
-Non‑editable install:
-```powershell
-pip install .
-```
+2. **Install dependencies:**
+   ```powershell
+   pip install numpy scipy sympy matplotlib jupyter
+   ```
 
-Quick Start:
-```powershell
-jupyter lab
-```
-Open `demo.ipynb` and run all cells to reproduce:
-- 3‑point / 4‑point violation region overlays.
-- Minimum value curves vs rotation angle / time.
-- Decoherence robustness comparison among ELGI / SLGI / WLGI.
+3. **Usage:**
+   - Open `demo.ipynb` in Jupyter Lab/Notebook.
+   - Run all cells to reproduce the main results and figures from the paper.
 
-## Repository Layout
+4. **Directory structure:**
+   - `lgbloch/` : Main code for LGI evaluation and visualization.
+   - `bloch4spin/` : Required dependency for Bloch basis and evolution (also available as an independent project: https://github.com/PolarisMegrez/bloch4spin)
+   - `demo.ipynb` : Example notebook to reproduce figures.
+   - `pic/` : Output figures.
+   - `data/` : Precomputed or saved data files.
 
-```
-.
-├─ lgbloch/            # Core package: distributions, LGI evaluators, visualization helpers
-├─ bloch4spin/         # Auxiliary (standalone) Bloch-space engine: basis, evolution, observables
-├─ demo.ipynb          # Main demonstration: reproduces violation plots / comparisons
-├─ pyproject.toml      # Packaging (temporary composite release of lgbloch + bloch4spin)
-├─ LICENSE             # License placeholder (adjust before public release)
-└─ old/                # Historical notebooks / scratch materials (not part of active API)
-```
-
-> Note: `bloch4spin` is an independent project (general SU(d) Bloch formalism and Lindblad / Hamiltonian evolution). It is vendored here only to simplify installation for review.
-
-## Detailed Components
-
-The short feature list above is expanded here for technical readers:
-- **Inequality modules**: `lgbloch.lgi` implements entropy‑based, correlator, and Wigner LGIs with numerically stable operations (pure NumPy).
-- **Probability engine**: `lgbloch.engine.distributions_from_deltas` couples to Bloch evolution to obtain all required multi‑time joint distributions explicitly.
-- **Bloch formalism**: `bloch4spin` supplies SU(d) irreducible tensor operator (ITO) basis generation, evolution matrices, and observable liftings.
-- **Caching strategy**: Wigner symbols stored only in canonical descending order with parity handling for 3j retrieval to minimize duplicates.
-- **Visualization**: `lgbloch.viz` aggregates multi‑output region logic and curve plotting with consistent color/label management.
-
-## Extending
-
-To add additional inequality variants or noise models:
-1. Implement distribution generation or channel in `lgbloch.engine` (or extend `bloch4spin.evolution`).
-2. Add inequality evaluator in `lgbloch.lgi` following existing style (pure NumPy, no unnecessary JIT).
-3. Add plotting integration via `viz.plot_boolean_region` / `viz.plot_multioutput_curves`.
-
-## Acknowledgements and License
-
-This project was developed with the assistance of Copilot. Licensed under the MIT License. See LICENSE for details.
+## Notes
+- This package is provided as supplemental material for academic use and reproduction of published results.
+- No installation to PyPI is planned. Simply unzip and use locally.
+- For questions or academic use, please cite the original paper.

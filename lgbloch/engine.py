@@ -8,10 +8,12 @@ from bloch4spin.engine import run
 from scipy.sparse import dok_matrix
 
 __all__ = [
-    "run_case",
     "JointProbabilitySet",
-    "distributions_from_times",
     "distributions_from_deltas",
+    "distributions_from_times",
+    "run_case",
+    "spin_ops",
+    "projectors_Jz",
 ]
 
 def spin_ops(d: int):
@@ -31,18 +33,12 @@ def spin_ops(d: int):
     j = (d - 1) / 2.0
     c = np.sqrt((j*(j+1)*(2*j+1))/3)
     
-    # Use dok_matrix for efficient single-element assignment
-    # Jz
     Jz_data = dok_matrix((d*d, 1), dtype=complex)
     Jz_data[_idx_from_kq(1, 0), 0] = c
     Jz = GeneralizedBlochVector(Jz_data.tocsc())
-    
-    # Jp
     Jp_data = dok_matrix((d*d, 1), dtype=complex)
     Jp_data[_idx_from_kq(1, 1), 0] = -np.sqrt(2) * c
     Jp = GeneralizedBlochVector(Jp_data.tocsc())
-    
-    # Jm
     Jm_data = dok_matrix((d*d, 1), dtype=complex)
     Jm_data[_idx_from_kq(1, -1), 0] = np.sqrt(2) * c
     Jm = GeneralizedBlochVector(Jm_data.tocsc())
@@ -74,7 +70,6 @@ def projectors_Jz(d: int, indices: Tuple[int, ...] | None = None):
         Ps.append(P)
     return Ps
 
-# Cache for (L, r0, obs_list) per dimension d to avoid recomputation
 _ENGINE_CACHE: dict[int, tuple] = {}
 
 def _get_engine_env(d: int):
@@ -88,7 +83,6 @@ def _get_engine_env(d: int):
         _ENGINE_CACHE[d] = (L_mat, r0 + 0.0 * Jz, obs_list)
     return _ENGINE_CACHE[d]
 
-# NOTE: No caching of JointProbabilitySet to respect user's request.
 
 def run_case(
     d: int,
@@ -109,12 +103,10 @@ def run_case(
     Returns
     - joint_prob: ndarray shaped (d, d, ..., d) with one axis per measurement time
     """
-    # Ensure Bloch basis dimension matches requested d before running
     bloch_init(d)
     schedule = [(float(t), obs_list) for t in times]
     return run(L_mat, r0, schedule, norm_mode="renormalized")
 
-# ---- Probability distributions helpers ----
 
 def _accumulate_times(deltas: List[float]) -> List[float]:
     """Given time gaps [t12, t23, ...], return absolute times [t1=0, t2, t3, ...]."""
@@ -133,7 +125,6 @@ def _powerset_indices(n: int) -> List[Tuple[int, ...]]:
         out.extend(combinations(range(1, n + 1), k))
     return out
 
-# ---- Probability distributions for all time subsets ----
 
 @dataclass(slots=True)
 class JointProbabilitySet:

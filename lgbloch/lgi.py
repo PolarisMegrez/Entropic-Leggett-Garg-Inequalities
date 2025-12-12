@@ -1,42 +1,28 @@
-"""LGI boolean test functions.
-
-This module exposes boolean-valued Leggett–Garg inequality (LGI) tests that
-operate on a `JointProbabilitySet` produced by the engine. Each test embeds
-the expected number of outcomes and time points and validates the input before
-performing its calculation. Implementations are NumPy-only for clarity and
-maintainability; no optional JIT/parallel paths are used.
-"""
-
 from typing import Tuple
 from itertools import combinations
 import numpy as np
 from .engine import JointProbabilitySet
 
 __all__ = [
+    "shannon_entropy",
     "entropic_LGI",
-    "entropic_LGI_three_point",
-    "entropic_LGI_four_point",
+    "entropic_LGI_for_order_k",
+    "entropic_LGI_from_chain_rule",
+    "print_entropic_LGI_forms_for_order_k",
     "standard_LGI_dichotomic_three_point",
     "standard_LGI_dichotomic_four_point",
     "wigner_LGI_dichotomic_three_point",
     "wigner_LGI_dichotomic_four_point",
 ]
 
-def _entropy_flat(arr: np.ndarray) -> float:
-    total = float(np.sum(arr))
+def shannon_entropy(p: np.ndarray) -> float:
+    p = np.asarray(p, dtype=float).ravel()
+    total = float(np.sum(p))
     if total <= 0.0:
         return 0.0
-    p = np.asarray(arr, dtype=float) / total
+    p = p / total
     mask = p > 0.0
     return float(-np.sum(p[mask] * np.log2(p[mask])))
-
-def _shannon_entropy_bits(p: np.ndarray) -> float:
-    p = np.asarray(p, dtype=float)
-    return float(_entropy_flat(p.ravel()))
-
-def _jz_values_for_d(d: int) -> np.ndarray:
-    j = (d - 1) / 2.0
-    return j - np.arange(d, dtype=float)
 
 def entropic_LGI(n: int, jps: JointProbabilitySet) -> float:
     r"""General entropic LGI test for n time points using Shannon cone basis elements.
@@ -56,6 +42,12 @@ def entropic_LGI(n: int, jps: JointProbabilitySet) -> float:
     -------
     float
         Minimum value of the inequalities.
+    
+    References
+    ----------
+    - Q.H. Cai, X.H. Yu, M.C. Yang, A.X. Liu, C.F. Qiao.
+      Conditions for Quantum Violation of Macrorealism in Large-spin Limit.
+      http://arxiv.org/abs/2505.13162 (2025).
     """
     jps.validate(expected_time_points=n)
     dist = jps.distributions
@@ -63,7 +55,7 @@ def entropic_LGI(n: int, jps: JointProbabilitySet) -> float:
     def H(subset):
         if not subset:
             return 0.0
-        return _shannon_entropy_bits(dist[tuple(sorted(subset))])
+        return shannon_entropy(dist[tuple(sorted(subset))])
 
     values = []
     # Iterate over all subset sizes k from 2 to n
@@ -84,6 +76,179 @@ def entropic_LGI(n: int, jps: JointProbabilitySet) -> float:
 
     return float(np.min(values)) if values else 0.0
 
+def entropic_LGI_for_order_k(k: int, n: int, jps: JointProbabilitySet) -> float:
+    r"""Entropic LGI test for a specific order k.
+
+    Computes the minimum value of inequalities belonging to order k:
+    1. Type 1 & 2 inequalities from subsets of size k.
+    2. Type 3 (derivative) inequalities from subsets of size k+1.
+
+    Parameters
+    ----------
+    k : int
+        Order of the inequality.
+    n : int
+        Total number of time points available.
+    jps : JointProbabilitySet
+        Joint probability tensors.
+
+    Returns
+    -------
+    float
+        Minimum value of the inequalities for order k.
+
+    References
+    ----------
+    - Q.H. Cai, X.H. Yu, M.C. Yang, A.X. Liu, C.F. Qiao.
+      Conditions for Quantum Violation of Macrorealism in Large-spin Limit.
+      http://arxiv.org/abs/2505.13162 (2025).
+    """
+    jps.validate(expected_time_points=n)
+    dist = jps.distributions
+    values = []
+
+    def H(subset):
+        if not subset:
+            return 0.0
+        return shannon_entropy(dist[tuple(sorted(subset))])
+
+    # 1. Inequalities from subsets of size k (Type 1 & Type 2)
+    for subset in combinations(range(1, n + 1), k):
+        subset_set = set(subset)
+
+        # Type 1: D_i^(S) = H(S) - H(S \ {i}) >= 0
+        for i in subset_set:
+            val = H(subset_set) - H(subset_set - {i})
+            values.append(val)
+
+        # Type 2: D_{i,j}^(S) = H(S \ {i}) + H(S \ {j}) - H(S) - H(S \ {i, j}) >= 0
+        for i, j in combinations(subset_set, 2):
+            val = H(subset_set - {i}) + H(subset_set - {j}) - H(subset_set) - H(subset_set - {i, j})
+            values.append(val)
+
+    # 2. Inequalities from subsets of size k+1 (Type 3)
+    # D_{i,j|k}^(S) = D_k^(S) + D_{i,j}^(S)
+    # This belongs to order k (one order lower than S)
+    if k + 1 <= n:
+        for subset in combinations(range(1, n + 1), k + 1):
+            subset_set = set(subset)
+            # Iterate over distinct i, j, k_idx in S
+            for k_idx in subset_set:
+                # Remaining set for i, j
+                remaining = subset_set - {k_idx}
+                for i, j in combinations(remaining, 2):
+                    # D_{i,j|k}^(S) = H(S\{i}) + H(S\{j}) - H(S\{k}) - H(S\{i,j})
+                    val = H(subset_set - {i}) + H(subset_set - {j}) - H(subset_set - {k_idx}) - H(subset_set - {i, j})
+                    values.append(val)
+
+    return float(np.min(values)) if values else 0.0
+
+def entropic_LGI_from_chain_rule(n: int, jps: JointProbabilitySet) -> float:
+    r"""Entropic LGI test based on the chain rule inequality (Devi et al.).
+
+    Iterates over all subsets of size k (3 <= k <= n) and computes the chain inequality:
+    \sum_{m=1}^{k-1} H(Q_{i_m}, Q_{i_{m+1}}) - \sum_{m=2}^{k-1} H(Q_{i_m}) - H(Q_{i_1}, Q_{i_k}) >= 0
+    where indices are sorted time points of the subset.
+
+    Parameters
+    ----------
+    n : int
+        Number of time points.
+    jps : JointProbabilitySet
+        Joint probability tensors.
+
+    Returns
+    -------
+    float
+        Minimum value of the chain inequalities over all subsets.
+
+    References
+    ----------
+    - A.R.U. Devi, H.S. Karthik, Sudha, A.K. Rajagopal.
+      Macrorealism from entropic Leggett-Garg inequalities.
+      Physical Review A 87(5), 052103 (2013).
+    """
+    jps.validate(expected_time_points=n)
+    dist = jps.distributions
+
+    def H(subset):
+        return shannon_entropy(dist[tuple(sorted(subset))])
+
+    values = []
+    # Iterate over subset sizes k from 3 to n
+    for k in range(3, n + 1):
+        for subset in combinations(range(1, n + 1), k):
+            indices = sorted(list(subset))
+            
+            term1 = 0.0
+            for m in range(k - 1):
+                term1 += H({indices[m], indices[m+1]})
+
+            term2 = 0.0
+            for m in range(1, k - 1):
+                term2 += H({indices[m]})
+
+            term3 = H({indices[0], indices[k-1]})
+
+            values.append(float(term1 - term2 - term3))
+
+    return float(np.min(values)) if values else 0.0
+
+def print_entropic_LGI_forms_for_order_k(k: int, n: int) -> None:
+    r"""Print the symbolic forms of entropic LGI inequalities for a specific order k.
+
+    This function generates and prints the inequalities that would be computed
+    by `entropic_LGI_for_order_k`, useful for verification.
+
+    Parameters
+    ----------
+    k : int
+        Order of the inequality.
+    n : int
+        Total number of time points available.
+    """
+    print(f"--- Entropic LGI Forms for Order k={k} (n={n}) ---")
+
+    def fmt_H(subset):
+        if not subset: return "0"
+        return f"H({{{', '.join(map(str, sorted(subset)))}}})"
+
+    # 1. Inequalities from subsets of size k (Type 1 & Type 2)
+    print(f"\n[Subsets of size {k}]")
+    for subset in combinations(range(1, n + 1), k):
+        subset_set = set(subset)
+        S_str = fmt_H(subset_set)
+        
+        # Type 1
+        for i in subset_set:
+            term1 = S_str
+            term2 = fmt_H(subset_set - {i})
+            print(f"Type 1 (i={i}): {term1} - {term2} >= 0")
+            
+        # Type 2
+        for i, j in combinations(subset_set, 2):
+            term1 = fmt_H(subset_set - {i})
+            term2 = fmt_H(subset_set - {j})
+            term3 = S_str
+            term4 = fmt_H(subset_set - {i, j})
+            print(f"Type 2 (i={i}, j={j}): {term1} + {term2} - {term3} - {term4} >= 0")
+
+    # 2. Inequalities from subsets of size k+1 (Type 3)
+    if k + 1 <= n:
+        print(f"\n[Subsets of size {k+1}] (Derivative Type 3)")
+        for subset in combinations(range(1, n + 1), k + 1):
+            subset_set = set(subset)
+            for k_idx in subset_set:
+                remaining = subset_set - {k_idx}
+                for i, j in combinations(remaining, 2):
+                    term1 = fmt_H(subset_set - {i})
+                    term2 = fmt_H(subset_set - {j})
+                    term3 = fmt_H(subset_set - {k_idx})
+                    term4 = fmt_H(subset_set - {i, j})
+                    print(f"Type 3 (k={k_idx} | i={i}, j={j}): {term1} + {term2} - {term3} - {term4} >= 0")
+    else:
+        print(f"\n[Subsets of size {k+1}] None (k+1 > n)")
+    print("-" * 60)
 
 def standard_LGI_dichotomic_three_point(jps: JointProbabilitySet) -> float:
     """Three-point standard LGI positivity test (dichotomic outcomes).

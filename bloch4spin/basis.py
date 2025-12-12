@@ -1,9 +1,10 @@
-r"""COBITO Bloch basis and operations for spin-j systems.
-
-Provides utilities to work with the Canonical Orthonormal Basis of Irreducible
-Tensor Operators (COBITO) ``T_q^{(k)}`` for Hilbert space dimension ``d=2j+1``.
-Includes an efficient Bloch-space vector wrapper, basis construction, tensor
-product expansion, and commutator structure constants using Wigner symbols.
+r"""
+bloch4spin: COBITO Bloch Basis and Operations for Spin-j Systems
+----------------------------------------------------------------
+Provides utilities for the Canonical Orthonormal Basis of Irreducible Tensor
+Operators (COBITO) T_q^{(k)} for Hilbert space dimension d=2j+1. Includes
+efficient Bloch-space vector wrappers, basis construction, tensor product
+expansion, and commutator structure constants using Wigner symbols.
 
 Public API
 ----------

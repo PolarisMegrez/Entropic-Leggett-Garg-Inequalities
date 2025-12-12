@@ -11,10 +11,6 @@ Affiliation : School of Physical Sciences, UCAS
 Contact : yuxuehao23@mails.ucas.ac.cn
 License : MIT
 Version : 0.1.0 (Nov 2025)
-
-Notes
------
-(neccesary notes)
 """
 
 from .basis import (
