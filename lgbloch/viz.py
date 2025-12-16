@@ -11,7 +11,8 @@ Public API
 
 Notes
 -----
-- Threading: Uses automatic thread count detection to avoid BLAS oversubscription.
+- Parallelization: Supports both process-based (default, via joblib) and thread-based parallelism.
+- Auto-detection: Automatically detects physical core count and respects OS limits (e.g., Windows 61-handle limit).
 - Function support: Supports both single-output and multi-output boolean functions.
 - Data persistence: Boolean region data can be saved to .npz files for later replotting.
 - Styling: Implements project-wide default matplotlib styling (Arial font, custom math text).
@@ -23,8 +24,10 @@ import time
 from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 
+import joblib
 import matplotlib.pyplot as plt
 import numpy as np
+from threadpoolctl import threadpool_limits
 
 __all__ = [
     "boolean_grid",
@@ -47,16 +50,39 @@ def _set_default_rcparams() -> None:
     plt.rcParams["ytick.labelsize"] = 15
 
 
-def _auto_n_jobs() -> int:
-    """Pick a conservative default thread count without extra deps.
+def _auto_n_jobs(backend: str = "threading") -> int:
+    """Pick a default thread/process count based on backend.
 
     Heuristic:
-    - If BLAS env vars suggest internal threading (>1), return 1 to avoid
-      oversubscription.
-    - Otherwise, use about half of logical CPUs minus one, capped at 16 and
-      at least 1.
+    - If backend is 'loky' or 'multiprocessing':
+      Try to use physical cores count (via psutil) if available, otherwise logical.
+      On Windows, cap at 61 due to OS limitations.
+    - If backend is 'threading':
+      Use a conservative limit (half of logical CPUs, max 16) to avoid
+      GIL contention and BLAS oversubscription.
     """
-    logical = os.cpu_count() or 1
+    # Try to get physical core count
+    try:
+        import psutil
+
+        physical = psutil.cpu_count(logical=False)
+        logical = psutil.cpu_count(logical=True)
+    except ImportError:
+        physical = None
+        logical = os.cpu_count() or 1
+
+    if physical is None:
+        physical = logical
+
+    if backend in ("loky", "multiprocessing"):
+        # Aggressive for processes: prefer physical cores
+        # On Windows, max_workers cannot exceed 61 due to WaitForMultipleObjects limit
+        limit = 61 if os.name == "nt" else logical
+        # Use physical cores as baseline, but respect Windows limit
+        target = physical
+        return max(1, min(target, limit))
+
+    # Conservative for threads
     # Check common BLAS threading env vars
     blas_keys = (
         "OMP_NUM_THREADS",
@@ -79,13 +105,15 @@ def _auto_n_jobs() -> int:
     return max(1, min(base - 1, 16))
 
 
-def _resolve_n_jobs(n_jobs: int | None) -> int:
+def _resolve_n_jobs(n_jobs: int | None, backend: str = "threading") -> int:
     """Resolve number of jobs for parallel execution.
 
     Parameters
     ----------
     n_jobs : int or None
         Requested number of jobs. If None or invalid, uses auto-detected value.
+    backend : str, optional
+        Parallel backend ('loky', 'threading', etc.). Default is 'threading'.
 
     Returns
     -------
@@ -94,13 +122,13 @@ def _resolve_n_jobs(n_jobs: int | None) -> int:
 
     """
     if n_jobs is None:
-        return _auto_n_jobs()
+        return _auto_n_jobs(backend)
     try:
         n = int(n_jobs)
     except Exception:
-        return _auto_n_jobs()
+        return _auto_n_jobs(backend)
     if n <= 0:
-        return _auto_n_jobs()
+        return _auto_n_jobs(backend)
     return n
 
 
@@ -111,6 +139,7 @@ def boolean_grid(
     n: int = 100,
     *,
     n_jobs: int | None = None,
+    backend: str = "auto",
 ):
     """Evaluate a boolean function (single or multi-output) on an (x,y) grid.
 
@@ -125,7 +154,10 @@ def boolean_grid(
     n : int, optional
         Number of grid points along each axis. Default is 100.
     n_jobs : int, optional
-        Number of threads for parallel execution. If None, chosen automatically.
+        Number of threads/processes for parallel execution. If None, chosen automatically.
+    backend : str, optional
+        Parallel backend ('loky', 'threading', 'multiprocessing', 'auto').
+        Default is 'auto' (which maps to 'loky' for process-based parallelism).
 
     Returns
     -------
@@ -138,6 +170,9 @@ def boolean_grid(
         If func returns K bools, shape is (K, n, n).
 
     """
+    if backend == "auto":
+        backend = "loky"
+
     x_min, x_max = map(float, x_range)
     y_min, y_max = map(float, y_range)
     n = int(n)
@@ -149,7 +184,7 @@ def boolean_grid(
     first = func(float(X_grid.flat[0]), float(Y_grid.flat[0]))
 
     # Helper to evaluate all remaining points, optionally threaded
-    nj = _resolve_n_jobs(n_jobs)
+    nj = _resolve_n_jobs(n_jobs, backend)
 
     def _get_coords():
         return [
@@ -157,30 +192,35 @@ def boolean_grid(
             for i in range(1, X_grid.size)
         ]
 
-    def eval_points_single():
-        mask = np.zeros((n, n), dtype=bool)
-        mask.flat[0] = bool(first)
-        if X_grid.size == 1:
-            return mask
-        coords = _get_coords()
-        if int(nj) and nj > 1:
-            n_workers = int(nj)
-            # Chunking: split tasks to reduce ThreadPoolExecutor overhead
-            n_chunks = n_workers * 4
-            chunk_size = max(1, len(coords) // n_chunks)
-            chunks = [
-                coords[i : i + chunk_size] for i in range(0, len(coords), chunk_size)
-            ]
-            print(
-                f"Parallel execution: {len(chunks)} chunks (target {n_chunks}) on "
-                f"{n_workers} workers."
-            )
+    def _run_parallel(coords, process_chunk_func):
+        """Common parallel execution logic."""
+        n_workers = int(nj)
+        # Chunking
+        n_chunks = n_workers * 4
+        chunk_size = max(1, len(coords) // n_chunks)
+        chunks = [coords[i : i + chunk_size] for i in range(0, len(coords), chunk_size)]
+        print(
+            f"Parallel execution ({backend}): {len(chunks)} chunks on "
+            f"{n_workers} workers."
+        )
 
-            def _process_chunk(chunk):
-                return [bool(func(x, y)) for (x, y) in chunk]
+        if backend in ("loky", "multiprocessing"):
+            # Process-based parallelism using joblib
+            # We wrap the chunk processor to limit BLAS threads in each worker
+            def _worker_wrapper(chunk):
+                with threadpool_limits(limits=1, user_api="blas"):
+                    return process_chunk_func(chunk)
 
+            # verbose=5 provides a simple progress display to stderr
+            chunk_results = joblib.Parallel(
+                n_jobs=n_workers, backend=backend, verbose=5
+            )(joblib.delayed(_worker_wrapper)(chunk) for chunk in chunks)
+            return [item for sublist in chunk_results for item in sublist]
+
+        else:
+            # Thread-based parallelism using ThreadPoolExecutor (legacy/fallback)
             with ThreadPoolExecutor(max_workers=n_workers) as ex:
-                futures = [ex.submit(_process_chunk, chunk) for chunk in chunks]
+                futures = [ex.submit(process_chunk_func, chunk) for chunk in chunks]
                 total = len(futures)
                 completed = 0
                 while completed < total:
@@ -189,7 +229,19 @@ def boolean_grid(
                     time.sleep(0.1)
                 print()
                 chunk_results = [f.result() for f in futures]
-            results = [item for sublist in chunk_results for item in sublist]
+            return [item for sublist in chunk_results for item in sublist]
+
+    def eval_points_single():
+        mask = np.zeros((n, n), dtype=bool)
+        mask.flat[0] = bool(first)
+        if X_grid.size == 1:
+            return mask
+        coords = _get_coords()
+        if int(nj) and nj > 1:
+            def _process_chunk(chunk):
+                return [bool(func(x, y)) for (x, y) in chunk]
+
+            results = _run_parallel(coords, _process_chunk)
         else:
             results = [bool(func(x, y)) for (x, y) in coords]
         mask.flat[1:] = np.array(results, dtype=bool)
@@ -203,39 +255,16 @@ def boolean_grid(
             return masks
         coords = _get_coords()
         if int(nj) and nj > 1:
-            n_workers = int(nj)
-            # Chunking: split tasks to reduce ThreadPoolExecutor overhead
-            n_chunks = n_workers * 4
-            chunk_size = max(1, len(coords) // n_chunks)
-            chunks = [
-                coords[i : i + chunk_size] for i in range(0, len(coords), chunk_size)
-            ]
-            print(
-                f"Parallel execution: {len(chunks)} chunks (target {n_chunks}) on "
-                f"{n_workers} workers."
-            )
-
             def _process_chunk(chunk):
                 return [func(x, y) for (x, y) in chunk]
 
-            with ThreadPoolExecutor(max_workers=n_workers) as ex:
-                futures = [ex.submit(_process_chunk, chunk) for chunk in chunks]
-                total = len(futures)
-                completed = 0
-                while completed < total:
-                    completed = sum(1 for f in futures if f.done())
-                    print(f"\rProgress: {completed}/{total} chunks", end="", flush=True)
-                    time.sleep(0.1)
-                print()
-                chunk_results = [f.result() for f in futures]
-            results = [item for sublist in chunk_results for item in sublist]
+            results = _run_parallel(coords, _process_chunk)
         else:
             results = [func(x, y) for (x, y) in coords]
         for idx, val in enumerate(results, start=1):
             for k in range(K):
                 masks[k].flat[idx] = bool(val[k])
         return masks
-
     if isinstance(first, (list, tuple, np.ndarray)):
         outs = list(first)
         K = len(outs)
@@ -253,6 +282,7 @@ def plot_boolean_region(
     n: int = 100,
     *,
     n_jobs: int | None = None,
+    backend: str = "auto",
     label: str | Sequence[str] | None = None,
     color: str | Sequence[str] | None = None,
     alpha: float | Sequence[float] = 0.4,
@@ -275,7 +305,10 @@ def plot_boolean_region(
     n : int, optional
         Number of grid points along each axis. Default is 100.
     n_jobs : int, optional
-        Number of threads for parallel execution. If None, chosen automatically.
+        Number of threads/processes for parallel execution. If None, chosen automatically.
+    backend : str, optional
+        Parallel backend ('loky', 'threading', 'multiprocessing', 'auto').
+        Default is 'auto' (which maps to 'loky' for process-based parallelism).
     label : str | Sequence[str], optional
         Label(s) for the region(s).
     color : str | Sequence[str], optional
@@ -306,7 +339,9 @@ def plot_boolean_region(
     # Matplotlib style per project convention
     _set_default_rcparams()
 
-    X_grid, Y_grid, masks = boolean_grid(func, x_range, y_range, n=n, n_jobs=n_jobs)
+    X_grid, Y_grid, masks = boolean_grid(
+        func, x_range, y_range, n=n, n_jobs=n_jobs, backend=backend
+    )
 
     if save_data:
         if isinstance(save_data, str):
@@ -323,7 +358,7 @@ def plot_boolean_region(
             os.makedirs(out_dir, exist_ok=True)
 
         np.savez_compressed(out_path, X=X_grid, Y=Y_grid, masks=masks)
-        print(f"Boolean region data saved to: {os.path.abspath(out_path)}")
+        print(f"Boolean region data saved to: {os.path.relpath(out_path)}")
 
     # Normalize to multi-output representation
     if masks.ndim == 2:
@@ -680,6 +715,7 @@ def plot_multioutput_curves(
     x_values: np.ndarray,
     *,
     n_jobs: int | None = None,
+    backend: str = "auto",
     label: str | Sequence[str] | None = None,
     color: str | Sequence[str] | None = None,
     linewidth: float | Sequence[float] = 1.5,
@@ -696,7 +732,10 @@ def plot_multioutput_curves(
     x_values : np.ndarray
         1D array of x values at which to evaluate ``func``.
     n_jobs : int, optional
-        Ignored. Parallel execution is disabled for this function.
+        Number of threads/processes for parallel execution. If None, chosen automatically.
+    backend : str, optional
+        Parallel backend ('loky', 'threading', 'multiprocessing', 'auto').
+        Default is 'auto' (which maps to 'loky' for process-based parallelism).
     label : str | Sequence[str], optional
         Label(s) for the curve(s); if multi-output, supply a list of length K.
     color : str | Sequence[str], optional
@@ -714,6 +753,9 @@ def plot_multioutput_curves(
         The Matplotlib figure and axes containing the overlay plot.
 
     """
+    if backend == "auto":
+        backend = "loky"
+
     x_values = np.asarray(x_values, dtype=float).ravel()
     if x_values.ndim != 1:
         raise ValueError("x_values must be a 1D array")
@@ -721,8 +763,50 @@ def plot_multioutput_curves(
     # Probe first point to determine arity
     first = func(float(x_values[0]))
 
+    # Helper to evaluate all remaining points, optionally threaded
+    nj = _resolve_n_jobs(n_jobs, backend)
+
     def _get_xs():
         return [float(x) for x in x_values[1:]]
+
+    def _run_parallel(xs, process_chunk_func):
+        """Common parallel execution logic."""
+        n_workers = int(nj)
+        # Chunking
+        n_chunks = n_workers * 4
+        chunk_size = max(1, len(xs) // n_chunks)
+        chunks = [xs[i : i + chunk_size] for i in range(0, len(xs), chunk_size)]
+        print(
+            f"Parallel execution ({backend}): {len(chunks)} chunks on "
+            f"{n_workers} workers."
+        )
+
+        if backend in ("loky", "multiprocessing"):
+            # Process-based parallelism using joblib
+            # We wrap the chunk processor to limit BLAS threads in each worker
+            def _worker_wrapper(chunk):
+                with threadpool_limits(limits=1, user_api="blas"):
+                    return process_chunk_func(chunk)
+
+            # verbose=5 provides a simple progress display to stderr
+            chunk_results = joblib.Parallel(
+                n_jobs=n_workers, backend=backend, verbose=5
+            )(joblib.delayed(_worker_wrapper)(chunk) for chunk in chunks)
+            return [item for sublist in chunk_results for item in sublist]
+
+        else:
+            # Thread-based parallelism using ThreadPoolExecutor (legacy/fallback)
+            with ThreadPoolExecutor(max_workers=n_workers) as ex:
+                futures = [ex.submit(process_chunk_func, chunk) for chunk in chunks]
+                total = len(futures)
+                completed = 0
+                while completed < total:
+                    completed = sum(1 for f in futures if f.done())
+                    print(f"\rProgress: {completed}/{total} chunks", end="", flush=True)
+                    time.sleep(0.1)
+                print()
+                chunk_results = [f.result() for f in futures]
+            return [item for sublist in chunk_results for item in sublist]
 
     if isinstance(first, (list, tuple, np.ndarray)):
         outs0 = list(first)
@@ -732,7 +816,13 @@ def plot_multioutput_curves(
             Y[k, 0] = float(outs0[k])
         if x_values.size > 1:
             xs = _get_xs()
-            results = [func(x) for x in xs]
+            if int(nj) and nj > 1:
+                def _process_chunk(chunk):
+                    return [func(x) for x in chunk]
+
+                results = _run_parallel(xs, _process_chunk)
+            else:
+                results = [func(x) for x in xs]
             for i, vals in enumerate(results, start=1):
                 for k in range(K):
                     Y[k, i] = float(vals[k])
@@ -742,7 +832,13 @@ def plot_multioutput_curves(
         Y[0, 0] = float(first)
         if x_values.size > 1:
             xs = _get_xs()
-            results = [func(x) for x in xs]
+            if int(nj) and nj > 1:
+                def _process_chunk(chunk):
+                    return [func(x) for x in chunk]
+
+                results = _run_parallel(xs, _process_chunk)
+            else:
+                results = [func(x) for x in xs]
             for i, val in enumerate(results, start=1):
                 Y[0, i] = float(val)
 

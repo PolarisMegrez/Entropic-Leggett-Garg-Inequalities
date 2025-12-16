@@ -1,15 +1,16 @@
 """lgbloch - Leggett-Garg Inequality Testing for Spin-j Systems
 ================================================================
-`lgbloch` provides tools for testing Leggett-Garg inequalities (LGI) in quantum
-mechanical systems using generalized Bloch representation. It combines spin
-operator construction, joint probability computation, and various LGI test
-forms (entropic, standard, and Wigner) with visualization capabilities.
+`lgbloch` provides efficient numerical testing of Leggett-Garg inequalities
+(LGI) in quantum systems of arbitrary spin-$j$. Built on the generalized
+Bloch representation, this package offers a unified framework for computing
+multi-time joint probabilities and evaluating various macrorealism criteria,
+including Entropic, Standard, and Wigner-form inequalities.
 
 Author : Yu Xue-hao (GitHub: @PolarisMegrez)
 Affiliation : School of Physical Sciences, UCAS
 Contact : yuxuehao23@mails.ucas.ac.cn
 License : MIT
-Version : 0.1.1 (Dec 2025)
+Version : 0.2.1 (Dec 2025)
 """
 
 from .engine import (

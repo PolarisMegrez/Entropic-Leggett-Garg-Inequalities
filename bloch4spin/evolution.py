@@ -271,8 +271,23 @@ class GeneralizedBlochEvolutionMatrix:
     )
     _expm_cache_maxsize: int = field(default=512, init=False, repr=False)
     _expm_cache_round: int = field(default=12, init=False, repr=False)
+    # _cache_lock is not picklable, so we exclude it from __getstate__
     _cache_lock: Lock = field(default_factory=Lock, init=False, repr=False)
     __array_priority__ = 1000
+
+    def __getstate__(self):
+        """Custom pickling state to exclude the lock."""
+        state = self.__dict__.copy()
+        # Remove the lock object which cannot be pickled
+        if "_cache_lock" in state:
+            del state["_cache_lock"]
+        return state
+
+    def __setstate__(self, state):
+        """Restore state and re-initialize the lock."""
+        self.__dict__.update(state)
+        # Re-create the lock in the new process
+        self._cache_lock = Lock()
 
     def __post_init__(self) -> None:
         """Initialize GeneralizedBlochEvolutionMatrix after dataclass construction.

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "lgbloch"
-version = "0.1.0"
+version = "0.2.1"
 description = "Leggett-Garg Inequalities Numerical Toolkit for spin-j quantum systems"
 authors = [{name = "Yu Xue-hao", email = "yuxuehao23@mails.ucas.ac.cn"}]
 requires-python = ">=3.10"
