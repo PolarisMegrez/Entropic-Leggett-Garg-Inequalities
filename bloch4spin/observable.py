@@ -1,5 +1,4 @@
-r"""
-bloch4spin: Measurement Superoperators in Bloch Representation
+r"""bloch4spin: Measurement Superoperators in Bloch Representation
 --------------------------------------------------------------
 Defines a compact wrapper for measurement-induced superoperators acting on
 Bloch vectors. For a Kraus operator ``K``, the action on a density operator is
@@ -19,15 +18,15 @@ Public API
 """
 
 from __future__ import annotations
+
 from dataclasses import dataclass
-from typing import Union
+
 import numpy as np
-from scipy.sparse import issparse, csr_matrix, isspmatrix_csr
+from scipy.sparse import csr_matrix, issparse, isspmatrix_csr
 
 from .basis import (
     GeneralizedBlochVector,
     bloch_dim,
-    bloch_tensor_product,
     bloch_hermitian_transpose,
 )
 
@@ -35,6 +34,7 @@ __all__ = [
     "GeneralizedBlochObservable",
     "apply_measurement",
 ]
+
 
 @dataclass
 class GeneralizedBlochObservable:
@@ -52,11 +52,18 @@ class GeneralizedBlochObservable:
     ------
     ValueError
         If ``data`` is not square or cannot be interpreted as complex.
+
     """
 
     data: csr_matrix
 
     def __post_init__(self) -> None:
+        """Initialize GeneralizedBlochObservable after dataclass construction.
+
+        Validates that the superoperator has the correct shape and converts
+        to CSR complex128 format.
+
+        """
         d = bloch_dim()
         expected = d * d
         arr = self.data
@@ -69,7 +76,9 @@ class GeneralizedBlochObservable:
         self.data = arr
 
     @staticmethod
-    def from_Kraus(K: Union[np.ndarray, GeneralizedBlochVector]) -> "GeneralizedBlochObservable":
+    def from_Kraus(
+        K: np.ndarray | GeneralizedBlochVector,
+    ) -> GeneralizedBlochObservable:
         r"""Construct the superoperator ``L_K`` for ``ρ -> K ρ K^\dagger``.
 
         Parameters
@@ -87,6 +96,7 @@ class GeneralizedBlochObservable:
         -----
         For each Bloch basis element ``T_a``, defines ``k_a = Bloch(K^\dagger T_a K)``.
         Since ``r'_a = <k_a, r>``, the row ``a`` of ``L_K`` equals ``conj(k_a)``.
+
         """
         d = bloch_dim()
         D = d * d
@@ -115,7 +125,9 @@ class GeneralizedBlochObservable:
         return GeneralizedBlochObservable(csr_matrix(L))
 
     @staticmethod
-    def from_POVM_elem(M: Union[np.ndarray, GeneralizedBlochVector], *, atol: float = 1e-12) -> "GeneralizedBlochObservable":
+    def from_POVM_elem(
+        M: np.ndarray | GeneralizedBlochVector, *, atol: float = 1e-12
+    ) -> GeneralizedBlochObservable:
         r"""Construct ``L`` from a single POVM element ``M = K^{\dagger}K``.
 
         Chooses the Kraus operator as the positive square root ``K = \sqrt{M}``.
@@ -137,6 +149,7 @@ class GeneralizedBlochObservable:
         ------
         ValueError
             If ``M`` is not Hermitian or has significantly negative eigenvalues.
+
         """
         if isinstance(M, GeneralizedBlochVector):
             mat = M.to_matrix()
@@ -157,7 +170,9 @@ class GeneralizedBlochObservable:
         return GeneralizedBlochObservable.from_Kraus(K)
 
     @staticmethod
-    def from_projector(P: Union[np.ndarray, GeneralizedBlochVector]) -> "GeneralizedBlochObservable":
+    def from_projector(
+        P: np.ndarray | GeneralizedBlochVector,
+    ) -> GeneralizedBlochObservable:
         r"""Rank-1 projector shortcut ``ρ -> P ρ P``.
 
         For a one-dimensional projector ``P = |ψ\rangle\langleψ|``, the post-measurement
@@ -179,6 +194,7 @@ class GeneralizedBlochObservable:
         -----
         No rank verification is performed. For non–rank-1 inputs, this shortcut
         does not equal ``ρ -> P ρ P``; use :meth:`from_Kraus` with ``K=P`` instead.
+
         """
         if isinstance(P, GeneralizedBlochVector):
             rP = P
@@ -190,12 +206,15 @@ class GeneralizedBlochObservable:
         L = np.outer(v, np.conj(v))
         return GeneralizedBlochObservable(csr_matrix(L))
 
-def apply_measurement(observables: list[GeneralizedBlochObservable],
-                      state,  # GeneralizedBlochState (forward-declared)
-                      *,
-                      norm_mode: str = "normalized",
-                      clip_negative: bool = True,
-                      atol: float = 1e-12):
+
+def apply_measurement(
+    observables: list[GeneralizedBlochObservable],
+    state,  # GeneralizedBlochState (forward-declared)
+    *,
+    norm_mode: str = "normalized",
+    clip_negative: bool = True,
+    atol: float = 1e-12,
+):
     r"""Apply a list of measurement superoperators to a Bloch state.
 
     Each ``GeneralizedBlochObservable`` represents a single outcome's
@@ -208,17 +227,21 @@ def apply_measurement(observables: list[GeneralizedBlochObservable],
         Measurement outcome superoperators ``L_i`` applied independently.
     state : GeneralizedBlochState
         Input Bloch state ``r``.
-        norm_mode : {"normalized", "renormalized", "unnormalized"}, optional
-                Controls how the observable set normalization is handled.
-                - "normalized": enforce completeness by checking ``sum_i L_i[0,0] == 1``;
-                    raises ``ValueError`` if violated.
-                - "renormalized": skip completeness check and renormalize the output
-                    probabilities to sum to 1 (if the total is positive).
-                - "unnormalized": skip completeness check and return raw probabilities.
-                Default is "normalized".
-        clip_negative : bool, optional
+    norm_mode : {"normalized", "renormalized", "unnormalized"}, optional
+        Controls how the observable set normalization is handled.
+
+        - "normalized": enforce completeness by checking
+          ``sum_i L_i[0,0] == 1``; raises ``ValueError`` if violated.
+        - "renormalized": skip completeness check and renormalize the output
+          probabilities to sum to 1 (if the total is positive).
+        - "unnormalized": skip completeness check and return raw probabilities.
+
+        Default is "normalized".
+
+    clip_negative : bool, optional
         If ``True``, small negative probabilities in ``[-atol, 0)`` are clipped
         to zero for numerical stability.
+
     atol : float, optional
         Absolute tolerance for treating probabilities as zero.
 
@@ -226,7 +249,7 @@ def apply_measurement(observables: list[GeneralizedBlochObservable],
     -------
     list of tuple
         For each observable ``L_i`` a tuple ``(p_i, post_state_i)`` where
-        ``p_i`` is the outcome probability (scalar or array) and ``post_state_i`` 
+        ``p_i`` is the outcome probability (scalar or array) and ``post_state_i``
         the normalized Bloch state after the measurement.
 
     Notes
@@ -235,37 +258,41 @@ def apply_measurement(observables: list[GeneralizedBlochObservable],
     unnormalized post-measurement operator corresponding to ``r'_i = L_i r``;
     with ``T_0^{(0)} = I/\sqrt{d}``, ``p_i = \sqrt{d} \cdot r'_{00}``.
     Normalization of each post state enforces ``r_{00} = 1/\sqrt{d}``.
+
     """
     from .evolution import GeneralizedBlochState  # local import to avoid cycle
+
     d = bloch_dim()
-    out: list[tuple[Union[float, np.ndarray], GeneralizedBlochState]] = []
+    out: list[tuple[float | np.ndarray, GeneralizedBlochState]] = []
     r_in = state.data
     sqrt_d = np.sqrt(d)
-    
+
     # Prepare accumulators for renormalization
     probs_tmp = []
     states_tmp = []
-    
+
     # Optional completeness check using sum_i L_i[0,0] == 1
     if norm_mode not in ("normalized", "renormalized", "unnormalized"):
-        raise ValueError("norm_mode must be 'normalized', 'renormalized', or 'unnormalized'.")
+        raise ValueError(
+            "norm_mode must be 'normalized', 'renormalized', or 'unnormalized'."
+        )
     if norm_mode == "normalized":
         csum = 0.0
         for obs in observables:
             csum += float(np.real(obs.data[0, 0]))
-        if not np.isclose(csum, 1.0, atol=10*atol):
+        if not np.isclose(csum, 1.0, atol=10 * atol):
             raise ValueError(f"Observable set not complete: sum L_i[0,0] = {csum} ≠ 1.")
 
     # Calculate unnormalized updates
     for obs in observables:
         r_prime = obs.data @ r_in  # unnormalized Bloch vector(s)
-        
+
         # Extract probability: sqrt(d) * r_prime[0]
         # r_prime is (d^2, N)
         r00s = r_prime[0, :]
         if issparse(r00s):
             r00s = r00s.toarray().flatten()
-        
+
         if r_prime.ndim == 1:
             p = (sqrt_d * r00s).real
             if clip_negative and p < 0 and p > -atol:
@@ -277,15 +304,15 @@ def apply_measurement(observables: list[GeneralizedBlochObservable],
                 p = np.asarray(p).flatten()
             elif p.ndim > 1:
                 p = p.flatten()
-                
+
             if clip_negative:
-                p[ (p < 0) & (p > -atol) ] = 0.0
-        
+                p[(p < 0) & (p > -atol)] = 0.0
+
         probs_tmp.append(p)
-        
+
         # Create state object
-        post = GeneralizedBlochState(r_prime) # Copy implied if r_prime is new array
-        
+        post = GeneralizedBlochState(r_prime)  # Copy implied if r_prime is new array
+
         # Normalize
         # If p is small/zero, normalization might fail or be skipped
         # We use the method's internal logic
@@ -293,7 +320,7 @@ def apply_measurement(observables: list[GeneralizedBlochObservable],
             post.normalization()
         except Exception:
             pass
-            
+
         states_tmp.append(post)
 
     # Optional global renormalization
@@ -314,6 +341,6 @@ def apply_measurement(observables: list[GeneralizedBlochObservable],
             for i in range(len(probs_tmp)):
                 probs_tmp[i] *= scale
 
-    for p, st in zip(probs_tmp, states_tmp):
+    for p, st in zip(probs_tmp, states_tmp, strict=True):
         out.append((p, st))
     return out

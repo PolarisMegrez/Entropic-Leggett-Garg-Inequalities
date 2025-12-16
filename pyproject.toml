@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lgbloch"
+version = "0.1.0"
+description = "Leggett-Garg Inequalities Numerical Toolkit for spin-j quantum systems"
+authors = [{name = "Yu Xue-hao", email = "yuxuehao23@mails.ucas.ac.cn"}]
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.24",
+    "scipy>=1.11",
+    "sympy>=1.10",
+    "matplotlib>=3.7",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["bloch4spin*", "lgbloch*"]
+exclude = ["pic", "data"]

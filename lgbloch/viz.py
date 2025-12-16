@@ -1,11 +1,30 @@
-from typing import Callable, Iterable, Optional, Sequence, Tuple, List, Union
-from concurrent.futures import ThreadPoolExecutor
+r"""lgbloch.viz: Visualization Tools for Leggett-Garg Inequality Analysis
+=====================================================================
+Provides visualization utilities for plotting boolean regions and multi-output curves used in Leggett-Garg inequality analysis. Includes parallel evaluation capabilities, data saving/loading, and multiple plotting modes. This module extends matplotlib with project-specific styling and provides efficient grid-based evaluation for parameter space exploration.
+
+Public API
+----------
+- ``boolean_grid``: Evaluate boolean function on (x,y) grid with parallel execution.
+- ``plot_boolean_region``: Plot boolean region(s) with customizable styling.
+- ``replot_boolean_region``: Replot boolean region(s) from saved .npz data.
+- ``plot_multioutput_curves``: Plot multiple curves from single-input function.
+
+Notes
+-----
+- Threading: Uses automatic thread count detection to avoid BLAS oversubscription.
+- Function support: Supports both single-output and multi-output boolean functions.
+- Data persistence: Boolean region data can be saved to .npz files for later replotting.
+- Styling: Implements project-wide default matplotlib styling (Arial font, custom math text).
+
+"""
+
 import os
-import sys
 import time
-import numpy as np
+from collections.abc import Callable, Sequence
+from concurrent.futures import ThreadPoolExecutor
+
 import matplotlib.pyplot as plt
-from matplotlib.colors import ListedColormap, to_rgba
+import numpy as np
 
 __all__ = [
     "boolean_grid",
@@ -14,28 +33,37 @@ __all__ = [
     "plot_multioutput_curves",
 ]
 
+
 def _set_default_rcparams() -> None:
     """Apply project-wide default Matplotlib font/mathtext settings."""
-    plt.rcParams['font.family'] = 'sans-serif'
-    plt.rcParams['font.sans-serif'] = ['Arial']
-    plt.rcParams['mathtext.fontset'] = 'custom'
-    plt.rcParams['mathtext.rm'] = 'sans'
-    plt.rcParams['mathtext.it'] = 'sans:italic'
-    plt.rcParams['mathtext.bf'] = 'sans:bold'
-    plt.rcParams['axes.labelsize'] = 18
-    plt.rcParams['xtick.labelsize'] = 15
-    plt.rcParams['ytick.labelsize'] = 15
+    plt.rcParams["font.family"] = "sans-serif"
+    plt.rcParams["font.sans-serif"] = ["Arial"]
+    plt.rcParams["mathtext.fontset"] = "custom"
+    plt.rcParams["mathtext.rm"] = "sans"
+    plt.rcParams["mathtext.it"] = "sans:italic"
+    plt.rcParams["mathtext.bf"] = "sans:bold"
+    plt.rcParams["axes.labelsize"] = 18
+    plt.rcParams["xtick.labelsize"] = 15
+    plt.rcParams["ytick.labelsize"] = 15
+
 
 def _auto_n_jobs() -> int:
     """Pick a conservative default thread count without extra deps.
 
     Heuristic:
-    - If BLAS env vars suggest internal threading (>1), return 1 to avoid oversubscription.
-    - Otherwise, use about half of logical CPUs minus one, capped at 16 and at least 1.
+    - If BLAS env vars suggest internal threading (>1), return 1 to avoid
+      oversubscription.
+    - Otherwise, use about half of logical CPUs minus one, capped at 16 and
+      at least 1.
     """
     logical = os.cpu_count() or 1
     # Check common BLAS threading env vars
-    blas_keys = ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "NUMEXPR_NUM_THREADS")
+    blas_keys = (
+        "OMP_NUM_THREADS",
+        "MKL_NUM_THREADS",
+        "OPENBLAS_NUM_THREADS",
+        "NUMEXPR_NUM_THREADS",
+    )
     max_blas = 0
     for k in blas_keys:
         v = os.environ.get(k, "").strip()
@@ -50,7 +78,21 @@ def _auto_n_jobs() -> int:
     base = max(1, logical // 2)
     return max(1, min(base - 1, 16))
 
-def _resolve_n_jobs(n_jobs: Optional[int]) -> int:
+
+def _resolve_n_jobs(n_jobs: int | None) -> int:
+    """Resolve number of jobs for parallel execution.
+
+    Parameters
+    ----------
+    n_jobs : int or None
+        Requested number of jobs. If None or invalid, uses auto-detected value.
+
+    Returns
+    -------
+    int
+        Number of jobs to use (always >= 1).
+
+    """
     if n_jobs is None:
         return _auto_n_jobs()
     try:
@@ -61,12 +103,15 @@ def _resolve_n_jobs(n_jobs: Optional[int]) -> int:
         return _auto_n_jobs()
     return n
 
-def boolean_grid(func: Callable[[float, float], Union[bool, Sequence[bool]]],
-                  x_range: Tuple[float, float],
-                  y_range: Tuple[float, float],
-                  n: int = 100,
-                  *,
-                  n_jobs: Optional[int] = None):
+
+def boolean_grid(
+    func: Callable[[float, float], bool | Sequence[bool]],
+    x_range: tuple[float, float],
+    y_range: tuple[float, float],
+    n: int = 100,
+    *,
+    n_jobs: int | None = None,
+):
     """Evaluate a boolean function (single or multi-output) on an (x,y) grid.
 
     Parameters
@@ -91,6 +136,7 @@ def boolean_grid(func: Callable[[float, float], Union[bool, Sequence[bool]]],
     masks : ndarray
         Boolean mask(s). If func returns single bool, shape is (n, n).
         If func returns K bools, shape is (K, n, n).
+
     """
     x_min, x_max = map(float, x_range)
     y_min, y_max = map(float, y_range)
@@ -106,7 +152,10 @@ def boolean_grid(func: Callable[[float, float], Union[bool, Sequence[bool]]],
     nj = _resolve_n_jobs(n_jobs)
 
     def _get_coords():
-        return [(float(X_grid.flat[i]), float(Y_grid.flat[i])) for i in range(1, X_grid.size)]
+        return [
+            (float(X_grid.flat[i]), float(Y_grid.flat[i]))
+            for i in range(1, X_grid.size)
+        ]
 
     def eval_points_single():
         mask = np.zeros((n, n), dtype=bool)
@@ -119,8 +168,13 @@ def boolean_grid(func: Callable[[float, float], Union[bool, Sequence[bool]]],
             # Chunking: split tasks to reduce ThreadPoolExecutor overhead
             n_chunks = n_workers * 4
             chunk_size = max(1, len(coords) // n_chunks)
-            chunks = [coords[i:i + chunk_size] for i in range(0, len(coords), chunk_size)]
-            print(f"Parallel execution: {len(chunks)} chunks (target {n_chunks}) on {n_workers} workers.")
+            chunks = [
+                coords[i : i + chunk_size] for i in range(0, len(coords), chunk_size)
+            ]
+            print(
+                f"Parallel execution: {len(chunks)} chunks (target {n_chunks}) on "
+                f"{n_workers} workers."
+            )
 
             def _process_chunk(chunk):
                 return [bool(func(x, y)) for (x, y) in chunk]
@@ -153,8 +207,13 @@ def boolean_grid(func: Callable[[float, float], Union[bool, Sequence[bool]]],
             # Chunking: split tasks to reduce ThreadPoolExecutor overhead
             n_chunks = n_workers * 4
             chunk_size = max(1, len(coords) // n_chunks)
-            chunks = [coords[i:i + chunk_size] for i in range(0, len(coords), chunk_size)]
-            print(f"Parallel execution: {len(chunks)} chunks (target {n_chunks}) on {n_workers} workers.")
+            chunks = [
+                coords[i : i + chunk_size] for i in range(0, len(coords), chunk_size)
+            ]
+            print(
+                f"Parallel execution: {len(chunks)} chunks (target {n_chunks}) on "
+                f"{n_workers} workers."
+            )
 
             def _process_chunk(chunk):
                 return [func(x, y) for (x, y) in chunk]
@@ -186,21 +245,22 @@ def boolean_grid(func: Callable[[float, float], Union[bool, Sequence[bool]]],
         mask = eval_points_single()
         return X_grid, Y_grid, mask
 
+
 def plot_boolean_region(
-    func: Callable[[float, float], Union[bool, Sequence[bool]]],
-    x_range: Tuple[float, float],
-    y_range: Tuple[float, float],
+    func: Callable[[float, float], bool | Sequence[bool]],
+    x_range: tuple[float, float],
+    y_range: tuple[float, float],
     n: int = 100,
     *,
-    n_jobs: Optional[int] = None,
-    label: Optional[Union[str, Sequence[str]]] = None,
-    color: Optional[Union[str, Sequence[str]]] = None,
-    alpha: Union[float, Sequence[float]] = 0.4,
-    linestyle: Optional[Union[str, Sequence[str]]] = None,
-    linewidth: Union[float, Sequence[float]] = 1.5,
+    n_jobs: int | None = None,
+    label: str | Sequence[str] | None = None,
+    color: str | Sequence[str] | None = None,
+    alpha: float | Sequence[float] = 0.4,
+    linestyle: str | Sequence[str] | None = None,
+    linewidth: float | Sequence[float] = 1.5,
     mode: str = "overlay",
-    ax: Optional[plt.Axes] = None,
-    save_data: Union[bool, str] = False,
+    ax: plt.Axes | None = None,
+    save_data: bool | str = False,
 ):
     """Plot boolean region(s) for a single- or multi-output function.
 
@@ -241,6 +301,7 @@ def plot_boolean_region(
         - 'overlay': (fig, ax)
         - 'separate': list of (fig, ax)
         - 'both': (fig_overlay, ax_overlay, list of (fig, ax))
+
     """
     # Matplotlib style per project convention
     _set_default_rcparams()
@@ -252,10 +313,10 @@ def plot_boolean_region(
             out_path = save_data
         else:
             out_path = getattr(func, "__name__", "boolean_region_data")
-        
+
         if not out_path.endswith(".npz"):
             out_path += ".npz"
-            
+
         # Ensure directory exists
         out_dir = os.path.dirname(out_path)
         if out_dir:
@@ -286,22 +347,28 @@ def plot_boolean_region(
     def draw_one(ax_obj, mk, lab, col, alp, lst, lwd):
         # Pick color
         if col is None:
-            col = next(ax_obj._get_lines.prop_cycler)['color']
-        
+            col = next(ax_obj._get_lines.prop_cycler)["color"]
+
         # Convert mask to float for contourf
         Z_float = mk.astype(float)
-        
+
         # Filled region using contourf (matching replot_from_data.ipynb)
         # levels=[0.5, 1.5] captures the '1's.
-        ax_obj.contourf(X_grid, Y_grid, Z_float, levels=[0.5, 1.5], colors=[col], alpha=float(alp))
-        
+        ax_obj.contourf(
+            X_grid, Y_grid, Z_float, levels=[0.5, 1.5], colors=[col], alpha=float(alp)
+        )
+
         # Boundary contour if linestyle is provided
         if lst is not None:
-            ax_obj.contour(X_grid, Y_grid, Z_float, 
-                           levels=[0.5], 
-                           colors=[col], 
-                           linestyles=[lst],
-                           linewidths=[lwd])
+            ax_obj.contour(
+                X_grid,
+                Y_grid,
+                Z_float,
+                levels=[0.5],
+                colors=[col],
+                linestyles=[lst],
+                linewidths=[lwd],
+            )
 
     mode = str(mode).lower()
     if mode not in ("overlay", "separate", "both"):
@@ -316,23 +383,41 @@ def plot_boolean_region(
         else:
             ax_overlay = ax
             fig_overlay = ax_overlay.figure
-        
+
         for k in range(K):
-            draw_one(ax_overlay, masks[k], labels[k], colors[k], alphas[k], linestyles[k], linewidths[k])
-            
+            draw_one(
+                ax_overlay,
+                masks[k],
+                labels[k],
+                colors[k],
+                alphas[k],
+                linestyles[k],
+                linewidths[k],
+            )
+
         # Custom legend handling to match replot_from_data.ipynb
         # replace the default legend created by draw_one (if any) with a cleaner one
         if any(labels):
             from matplotlib.lines import Line2D
+
             legend_elements = []
             for k in range(K):
                 if labels[k]:
                     # Use Line2D as in replot_from_data.ipynb
-                    c = colors[k] if colors[k] is not None else 'k' # fallback
+                    c = colors[k] if colors[k] is not None else "k"  # fallback
                     legend_elements.append(
-                        Line2D([0], [0], color=c, lw=linewidths[k], linestyle=linestyles[k], label=labels[k])
+                        Line2D(
+                            [0],
+                            [0],
+                            color=c,
+                            lw=linewidths[k],
+                            linestyle=linestyles[k],
+                            label=labels[k],
+                        )
                     )
-            ax_overlay.legend(handles=legend_elements, loc='upper right', framealpha=0.9, fontsize=15)
+            ax_overlay.legend(
+                handles=legend_elements, loc="upper right", framealpha=0.9, fontsize=15
+            )
 
         ax_overlay.set_xlim(x_range)
         ax_overlay.set_ylim(y_range)
@@ -342,38 +427,55 @@ def plot_boolean_region(
 
     # Separate plots
     if mode in ("separate", "both"):
-        fig_list: List[plt.Figure] = []
-        ax_list: List[plt.Axes] = []
+        fig_list: list[plt.Figure] = []
+        ax_list: list[plt.Axes] = []
         for k in range(K):
             fig_k, ax_k = plt.subplots(figsize=(5, 4))
-            draw_one(ax_k, masks[k], labels[k], colors[k], alphas[k], linestyles[k], linewidths[k])
-            
+            draw_one(
+                ax_k,
+                masks[k],
+                labels[k],
+                colors[k],
+                alphas[k],
+                linestyles[k],
+                linewidths[k],
+            )
+
             # Add legend for separate plots if label exists
             if labels[k]:
                 from matplotlib.lines import Line2D
-                c = colors[k] if colors[k] is not None else 'k'
-                le = Line2D([0], [0], color=c, lw=linewidths[k], linestyle=linestyles[k], label=labels[k])
-                ax_k.legend(handles=[le], loc='upper right', fontsize=15)
-                
+
+                c = colors[k] if colors[k] is not None else "k"
+                le = Line2D(
+                    [0],
+                    [0],
+                    color=c,
+                    lw=linewidths[k],
+                    linestyle=linestyles[k],
+                    label=labels[k],
+                )
+                ax_k.legend(handles=[le], loc="upper right", fontsize=15)
+
             ax_k.set_xlim(x_range)
             ax_k.set_ylim(y_range)
             fig_list.append(fig_k)
             ax_list.append(ax_k)
         if mode == "separate":
-            return list(zip(fig_list, ax_list))
+            return list(zip(fig_list, ax_list, strict=True))
         else:
-            return results + (list(zip(fig_list, ax_list)),)  # type: ignore
+            return results + (list(zip(fig_list, ax_list, strict=True)),)  # type: ignore
+
 
 def replot_boolean_region(
     filename: str,
     *,
-    label: Optional[Union[str, Sequence[str]]] = None,
-    color: Optional[Union[str, Sequence[str]]] = None,
-    alpha: Union[float, Sequence[float]] = 0.4,
-    linestyle: Optional[Union[str, Sequence[str]]] = None,
-    linewidth: Union[float, Sequence[float]] = 1.5,
+    label: str | Sequence[str] | None = None,
+    color: str | Sequence[str] | None = None,
+    alpha: float | Sequence[float] = 0.4,
+    linestyle: str | Sequence[str] | None = None,
+    linewidth: float | Sequence[float] = 1.5,
     mode: str = "overlay",
-    ax: Optional[plt.Axes] = None,
+    ax: plt.Axes | None = None,
 ):
     """Replot boolean region(s) from a saved .npz file.
 
@@ -400,24 +502,25 @@ def replot_boolean_region(
     -------
     result : tuple or list
         Same as plot_boolean_region.
+
     """
     _set_default_rcparams()
 
     # Load data
     with np.load(filename) as data:
-        if 'x' in data and 'y' in data and 'z' in data:
-            x = data['x']
-            y = data['y']
-            z = data['z']
+        if "x" in data and "y" in data and "z" in data:
+            x = data["x"]
+            y = data["y"]
+            z = data["z"]
             if x.ndim == 1:
                 X_grid, Y_grid = np.meshgrid(x, y)
             else:
                 X_grid, Y_grid = x, y
             masks = z
-        elif 'X' in data and 'Y' in data and 'masks' in data:
-            X_grid = data['X']
-            Y_grid = data['Y']
-            masks = data['masks']
+        elif "X" in data and "Y" in data and "masks" in data:
+            X_grid = data["X"]
+            Y_grid = data["Y"]
+            masks = data["masks"]
             if X_grid.ndim == 1:
                 X_grid, Y_grid = np.meshgrid(X_grid, Y_grid)
         else:
@@ -456,21 +559,27 @@ def replot_boolean_region(
     def draw_one(ax_obj, mk, lab, col, alp, lst, lwd):
         # Pick color
         if col is None:
-            col = next(ax_obj._get_lines.prop_cycler)['color']
-        
+            col = next(ax_obj._get_lines.prop_cycler)["color"]
+
         # Convert mask to float for contourf
         Z_float = mk.astype(float)
-        
+
         # Filled region
-        ax_obj.contourf(X_grid, Y_grid, Z_float, levels=[0.5, 1.5], colors=[col], alpha=float(alp))
-        
+        ax_obj.contourf(
+            X_grid, Y_grid, Z_float, levels=[0.5, 1.5], colors=[col], alpha=float(alp)
+        )
+
         # Boundary contour if linestyle is provided
         if lst is not None:
-            ax_obj.contour(X_grid, Y_grid, Z_float, 
-                           levels=[0.5], 
-                           colors=[col], 
-                           linestyles=[lst],
-                           linewidths=[lwd])
+            ax_obj.contour(
+                X_grid,
+                Y_grid,
+                Z_float,
+                levels=[0.5],
+                colors=[col],
+                linestyles=[lst],
+                linewidths=[lwd],
+            )
 
     mode = str(mode).lower()
     if mode not in ("overlay", "separate", "both"):
@@ -485,62 +594,97 @@ def replot_boolean_region(
         else:
             ax_overlay = ax
             fig_overlay = ax_overlay.figure
-        
+
         for k in range(K):
-            draw_one(ax_overlay, masks[k], labels[k], colors[k], alphas[k], linestyles[k], linewidths[k])
-            
+            draw_one(
+                ax_overlay,
+                masks[k],
+                labels[k],
+                colors[k],
+                alphas[k],
+                linestyles[k],
+                linewidths[k],
+            )
+
         # Custom legend
         if any(labels):
             from matplotlib.lines import Line2D
+
             legend_elements = []
             for k in range(K):
                 if labels[k]:
-                    c = colors[k] if colors[k] is not None else 'k'
+                    c = colors[k] if colors[k] is not None else "k"
                     legend_elements.append(
-                        Line2D([0], [0], color=c, lw=linewidths[k], linestyle=linestyles[k], label=labels[k])
+                        Line2D(
+                            [0],
+                            [0],
+                            color=c,
+                            lw=linewidths[k],
+                            linestyle=linestyles[k],
+                            label=labels[k],
+                        )
                     )
-            ax_overlay.legend(handles=legend_elements, loc='upper right', framealpha=0.9, fontsize=15)
+            ax_overlay.legend(
+                handles=legend_elements, loc="upper right", framealpha=0.9, fontsize=15
+            )
 
         ax_overlay.set_xlim(x_range)
         ax_overlay.set_ylim(y_range)
-        
+
         if mode == "overlay":
             return fig_overlay, ax_overlay
         results = (fig_overlay, ax_overlay)
 
     # Separate plots
     if mode in ("separate", "both"):
-        fig_list: List[plt.Figure] = []
-        ax_list: List[plt.Axes] = []
+        fig_list: list[plt.Figure] = []
+        ax_list: list[plt.Axes] = []
         for k in range(K):
             fig_k, ax_k = plt.subplots(figsize=(5, 4))
-            draw_one(ax_k, masks[k], labels[k], colors[k], alphas[k], linestyles[k], linewidths[k])
-            
+            draw_one(
+                ax_k,
+                masks[k],
+                labels[k],
+                colors[k],
+                alphas[k],
+                linestyles[k],
+                linewidths[k],
+            )
+
             if labels[k]:
                 from matplotlib.lines import Line2D
-                c = colors[k] if colors[k] is not None else 'k'
-                le = Line2D([0], [0], color=c, lw=linewidths[k], linestyle=linestyles[k], label=labels[k])
-                ax_k.legend(handles=[le], loc='upper right', fontsize=15)
-                
+
+                c = colors[k] if colors[k] is not None else "k"
+                le = Line2D(
+                    [0],
+                    [0],
+                    color=c,
+                    lw=linewidths[k],
+                    linestyle=linestyles[k],
+                    label=labels[k],
+                )
+                ax_k.legend(handles=[le], loc="upper right", fontsize=15)
+
             ax_k.set_xlim(x_range)
             ax_k.set_ylim(y_range)
             fig_list.append(fig_k)
             ax_list.append(ax_k)
         if mode == "separate":
-            return list(zip(fig_list, ax_list))
+            return list(zip(fig_list, ax_list, strict=True))
         else:
-            return results + (list(zip(fig_list, ax_list)),)  # type: ignore
+            return results + (list(zip(fig_list, ax_list, strict=True)),)  # type: ignore
+
 
 def plot_multioutput_curves(
-    func: Callable[[float], Union[float, Sequence[float]]],
+    func: Callable[[float], float | Sequence[float]],
     x_values: np.ndarray,
     *,
-    n_jobs: Optional[int] = None,
-    label: Optional[Union[str, Sequence[str]]] = None,
-    color: Optional[Union[str, Sequence[str]]] = None,
-    linewidth: Union[float, Sequence[float]] = 1.5,
-    linestyle: Optional[Union[str, Sequence[str]]] = None,
-    ax: Optional[plt.Axes] = None,
+    n_jobs: int | None = None,
+    label: str | Sequence[str] | None = None,
+    color: str | Sequence[str] | None = None,
+    linewidth: float | Sequence[float] = 1.5,
+    linestyle: str | Sequence[str] | None = None,
+    ax: plt.Axes | None = None,
 ):
     """Plot multiple y(x) curves returned by a single-input function on one axes.
 
@@ -568,6 +712,7 @@ def plot_multioutput_curves(
     -------
     (fig, ax)
         The Matplotlib figure and axes containing the overlay plot.
+
     """
     x_values = np.asarray(x_values, dtype=float).ravel()
     if x_values.ndim != 1:
@@ -611,8 +756,8 @@ def plot_multioutput_curves(
 
     labels = to_list(label, None, K)
     colors = to_list(color, None, K)
-    lws    = to_list(linewidth, 1.5, K)
-    lss    = to_list(linestyle, '-', K)
+    lws = to_list(linewidth, 1.5, K)
+    lss = to_list(linestyle, "-", K)
 
     # Apply global style
     _set_default_rcparams()
@@ -632,9 +777,16 @@ def plot_multioutput_curves(
                 col = ax._get_lines.get_next_color()
             except Exception:
                 col = None
-        ax.plot(x_values, Y[k], label=labels[k], color=col, linewidth=float(lws[k]), linestyle=lss[k])
+        ax.plot(
+            x_values,
+            Y[k],
+            label=labels[k],
+            color=col,
+            linewidth=float(lws[k]),
+            linestyle=lss[k],
+        )
 
     if any(lab is not None for lab in labels):
-        ax.legend(loc='upper right', fontsize=15, labelspacing=0.35)
+        ax.legend(loc="upper right", fontsize=15, labelspacing=0.35)
     ax.grid(True, alpha=0.2)
     return fig, ax
